@@ -1,0 +1,20 @@
+# サイト固有の要注意語（1行1正規表現）
+#
+#   cp dev/privacy_words.example.txt dev/privacy_words.txt
+#
+# `dev/privacy_words.txt` は .gitignore 済みなので公開されない。
+# ここに自分の環境の固有名を書いておくと、README や .env.example に
+# 書き戻してしまったときに `python3 dev/privacy_check.py` が拾う。
+#
+# プライベートIP・グローバルIP・SSH鍵ファイル名・sessionid の実値は
+# privacy_check.py の汎用パターンが最初から見ているので、書かなくてよい。
+
+# --- ホスト名（例） ---
+#myserver-\d+
+#proxy-lxc
+
+# --- 回線事業者名・ISP名（構成が推測できる） ---
+#SomeISP
+
+# --- 鍵やアカウントの名前 ---
+#mykeyname\w*

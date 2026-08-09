@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IG-Ray</title>
+<script>
+(function() {
+    const t = localStorage.getItem('instaray-theme') || 'light';
+    document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import post_card %}
+
+<header>
+    <div class="header-left">
+        <h1>IG-Ray<span class="alpha">(α)</span></h1>
+        <div class="meta">
+            全{{ total }}件
+            {% if last_jst %} ・ 最終更新: {{ last_jst }}{% endif %}
+        </div>
+        {% if troubles %}
+        <div class="health health-warn">
+            ⚠️ 直近6時間の失敗:
+            {% for t in troubles %}
+            <span class="health-account">{{ t.username }}({{ t.status }}×{{ t.n }})</span>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="health health-ok">✓ 直近6時間の失敗なし</div>
+        {% endif %}
+    </div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+
+{% set active_page = 'home' %}
+{% include '_nav.html' %}
+
+<main id="feed">
+    {% if posts %}
+        {% for p in posts %}{{ post_card(p) }}{% endfor %}
+        {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
+    {% else %}
+        <div class="empty">まだ投稿がありません。<br>
+        <code>docker compose run --rm scrape アカウント名 --limit 12</code> で取得してください。</div>
+    {% endif %}
+    <div class="infinite-status" id="infinite-status"></div>
+</main>
+
+{% include '_scripts.html' %}
+</body>
+</html>

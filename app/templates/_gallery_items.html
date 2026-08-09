@@ -1,0 +1,16 @@
+{# 無限スクロール用: ギャラリーのグリッドアイテムだけを返すパーシャル #}
+{% for it in items %}
+<div class="gallery-item" data-imgs="{{ [it.src] | tojson | b64encode }}" data-idx="0"
+     data-handle="{{ it.owner_username }}" data-tid="{{ it.shortcode }}" data-fidx="{{ it.idx }}"
+     data-dt="{{ it.date_utc[:10] }}"
+     data-vids="{{ [it.url if it.is_video else None] | tojson | b64encode }}"
+     onclick="imgClick(this)">
+    <img src="{{ it.src }}" loading="lazy" alt="">
+    {% if it.is_video %}
+    <a class="media-badge play" href="{{ it.url }}" target="_blank" rel="noopener"
+       title="Instagramで再生" onclick="event.stopPropagation()">▶ 再生</a>
+    {% endif %}
+    <div class="gi-overlay">{{ it.owner_username }}</div>
+</div>
+{% endfor %}
+{% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ギャラリー - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>🖼 ギャラリー</h1>
+    <div class="meta">{{ items|length }}枚表示中</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'gallery' %}
+{% include '_nav.html' %}
+
+<nav class="tabs">
+    <a href="/gallery" class="tab {% if not current_user %}active{% endif %}">すべて</a>
+    {% for u in users %}
+    <a href="/gallery?user={{ u }}" class="tab {% if current_user == u %}active{% endif %}">{{ u }}</a>
+    {% endfor %}
+</nav>
+
+{% if items %}
+<div class="gallery-grid" id="feed">
+    {% for it in items %}
+    <div class="gallery-item" data-imgs="{{ [it.src] | tojson | b64encode }}" data-idx="0"
+         data-handle="{{ it.owner_username }}" data-tid="{{ it.shortcode }}" data-fidx="{{ it.idx }}"
+         data-dt="{{ it.date_utc[:10] }}"
+         data-vids="{{ [it.url if it.is_video else None] | tojson | b64encode }}"
+         onclick="imgClick(this)">
+        <img src="{{ it.src }}" loading="lazy" alt="">
+        {% if it.is_video %}
+        <a class="media-badge play" href="{{ it.url }}" target="_blank" rel="noopener"
+           title="Instagramで再生" onclick="event.stopPropagation()">▶ 再生</a>
+        {% endif %}
+        <div class="gi-overlay">{{ it.owner_username }}</div>
+    </div>
+    {% endfor %}
+    {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
+</div>
+<div class="infinite-status" id="infinite-status"></div>
+{% else %}
+<div class="empty">画像がありません</div>
+{% endif %}
+
+{% include '_scripts.html' %}
+</body>
+</html>

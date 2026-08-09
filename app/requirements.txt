@@ -1,0 +1,2 @@
+instaloader==4.15.3
+requests>=2.31.0

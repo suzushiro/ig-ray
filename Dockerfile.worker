@@ -1,0 +1,42 @@
+# insta-ray worker
+#
+# Python は 3.12 に固定する。母艦の Ubuntu は 3.14 で、instaloader 4.15.3 の
+# 検証済み環境から外れるため。コンテナ側で握っておけば母艦の更新に振られない。
+FROM python:3.12-slim
+
+# tini: docker stop / Ctrl-C を子プロセスへ正しく伝える（長時間の取得を中断できるように）
+# sqlite3: コンテナ内から DB を覗くデバッグ用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tini \
+        sqlite3 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# requirements だけ先に入れてレイヤキャッシュを効かせる
+COPY app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY app/ /app/
+
+# root で走らせない。/data はホスト側マウントなので、UID/GID は
+# compose の user: で母艦のユーザーに合わせる（既定は 1000:1000）。
+RUN useradd --create-home --uid 1000 --shell /bin/bash insta \
+    && mkdir -p /data \
+    && chown -R insta:insta /data /app
+USER insta
+
+ENV INSTA_RAY_DB=/data/insta_ray.db \
+    INSTA_RAY_SESSIONS=/data/sessions \
+    INSTA_RAY_CACHE=/data/cache
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# 既定は「何もしない」。取得は compose の profile 付きサービスか
+# docker compose run で明示的に叩く。うっかり常駐して叩き続けるのを防ぐため。
+CMD ["python", "-c", "import db, os; db.init_db(); print('insta-ray worker ready. DB:', os.environ.get('INSTA_RAY_DB'))"]

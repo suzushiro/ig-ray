@@ -1,0 +1,10 @@
+.env
+data/
+*.pyc
+__pycache__/
+*.zip
+
+# 作業メモ（環境固有の情報・IP・ホスト名・アカウント名）
+# 雛形は NOTES.example.md
+NOTES.md
+dev/privacy_words.txt

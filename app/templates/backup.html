@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>バックアップ - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+<style>
+.bk-wrap{max-width:900px;margin:0 auto;padding:16px}
+.bk-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;
+         padding:16px;margin-bottom:14px}
+.bk-card h3{font-size:14px;margin:0 0 12px}
+.bk-row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;
+        border-bottom:1px solid var(--border);font-size:13px}
+.bk-row:last-child{border-bottom:none}
+.bk-row .label{color:var(--text-dim)}
+.bk-row .value{font-variant-numeric:tabular-nums}
+.bk-next{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;margin:2px 0 4px}
+.bk-sub{font-size:11px;color:var(--text-dim);line-height:1.6}
+.bk-none{font-size:13px;color:var(--text-dim)}
+.bk-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
+.bk-table th{text-align:left;color:var(--text-dim);font-weight:500;padding:5px 6px;
+             border-bottom:1px solid var(--border);white-space:nowrap}
+.bk-table td{padding:5px 6px;border-bottom:1px solid var(--border)}
+.bk-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+.bk-table a{color:inherit;text-decoration:none}
+.bk-table a:hover{text-decoration:underline}
+.bk-user{display:flex;align-items:center;gap:6px}
+.bk-user img{width:22px;height:22px;border-radius:50%;object-fit:cover;flex:none}
+.bk-dot{width:22px;height:22px;border-radius:50%;background:var(--surface-hover);flex:none}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:10px;
+      background:var(--surface-hover);color:var(--text-dim);white-space:nowrap}
+.pill.running{background:#1d9bf022;color:#1d9bf0}
+.pill.done{background:#00ba7c22;color:#00ba7c}
+.pill.queued{background:var(--surface-hover)}
+.pill.paused{background:#8899a622}
+.pill.error,.pill.ratelimited{background:#e0245e22;color:#e0245e}
+.bk-alert{font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:10px;
+          background:#e0245e14;color:#e0245e;border:1px solid #e0245e33}
+.bk-ok{font-size:12px;color:var(--text-dim)}
+</style>
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>💾 バックアップ</h1>
+    <div class="meta">巡回と全件バックフィルの状況</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'backup' %}
+{% include '_nav.html' %}
+
+<div class="bk-wrap">
+
+    <!-- ============ 定期巡回 ============ -->
+    <div class="bk-card">
+        <h3>🔄 定期巡回（新着チェック）</h3>
+
+        {% if cron_next %}
+        <div class="bk-next" data-countdown="{{ cron_next }}">--</div>
+        <div class="bk-sub">次回 <span data-abstime="{{ cron_next }}">--</span></div>
+        {% else %}
+        <div class="bk-none">次回の予定は記録されていません。</div>
+        <div class="bk-sub">
+            巡回コンテナが動いていないか、まだ1周も終わっていない可能性があります。<br>
+            <code>docker compose --profile cron up -d</code> で起動します。
+        </div>
+        {% endif %}
+
+        <div style="margin-top:12px">
+            <div class="bk-row"><span class="label">間隔</span>
+                <span class="value">{{ cron_interval_h }} 時間ごと（1周終わってから）</span></div>
+            <div class="bk-row"><span class="label">1アカウントあたり</span>
+                <span class="value">{{ cron_limit }} 件</span></div>
+            <div class="bk-row"><span class="label">対象アカウント</span>
+                <span class="value">{{ n_accounts }} 件</span></div>
+            <div class="bk-row"><span class="label">前回の記録</span>
+                <span class="value" data-abstime="{{ cron_last }}">{{ cron_last or '—' }}</span></div>
+            <div class="bk-row"><span class="label">直近1周の結果</span>
+                <span class="value">
+                {% for st, n in cron_summary.items() %}
+                    <span class="pill {{ 'done' if st.startswith('ok') else st }}">{{ st }} {{ n }}</span>
+                {% else %}—{% endfor %}
+                </span></div>
+        </div>
+        <div class="bk-sub" style="margin-top:8px">
+            <code>ok_degraded</code> が正常です（プロフィール詳細は取らず投稿だけ取る運用のため）。
+        </div>
+    </div>
+
+    <!-- ============ バックフィル ============ -->
+    <div class="bk-card">
+        <h3>📦 全件バックフィル（丸ごとバックアップ）</h3>
+
+        {% if not jobs %}
+        <div class="bk-none">バックフィルのジョブはありません。</div>
+        <div class="bk-sub">
+            <code>docker compose run --rm backfill add ユーザー名</code> で追加し、<br>
+            <code>docker compose --profile backfill up -d</code> でワーカーを起動します。
+        </div>
+        {% else %}
+
+        {% if not worker_alive %}
+        <div class="bk-alert">
+            ⚠ ワーカーが動いていないようです
+            {%- if worker_age %}（最後の反応から {{ (worker_age // 60) }} 分）{% endif %}。<br>
+            <code>docker compose --profile backfill up -d</code> で起動してください。
+        </div>
+        {% endif %}
+
+        {% if running %}
+        <div class="bk-row"><span class="label">処理中</span>
+            <span class="value"><b>{{ running.username }}</b>
+                — {{ running.posts_seen }} 件確認 / 新規 {{ running.posts_saved }}</span></div>
+        {% endif %}
+
+        {% if bf_next %}
+        <div class="bk-next" data-countdown="{{ bf_next }}">--</div>
+        <div class="bk-sub">次のページ取得 <span data-abstime="{{ bf_next }}">--</span></div>
+        {% elif worker_alive %}
+        <div class="bk-none">待機中（取得中か、キューが空です）。</div>
+        {% endif %}
+
+        <div style="margin-top:12px">
+            <div class="bk-row"><span class="label">キュー待ち / 完了</span>
+                <span class="value">{{ totals.queued }} / {{ totals.done }}</span></div>
+            <div class="bk-row"><span class="label">確認した投稿</span>
+                <span class="value">{{ totals.posts }} 件</span></div>
+            <div class="bk-row"><span class="label">新規に保存</span>
+                <span class="value">{{ totals.saved }} 件</span></div>
+            <div class="bk-row"><span class="label">保存したメディア</span>
+                <span class="value">{{ totals.media }} 件</span></div>
+        </div>
+
+        <table class="bk-table">
+            <tr><th>状態</th><th>アカウント</th><th>確認</th><th>新規</th>
+                <th>メディア</th><th>頁</th><th>周</th><th>遡った日付</th></tr>
+            {% for j in jobs %}
+            <tr>
+                <td><span class="pill {{ j.status }}">{{ j.status }}</span></td>
+                <td>
+                    <span class="bk-user">
+                        {% if j.avatar %}<img src="{{ j.avatar }}" alt="" loading="lazy">
+                        {% else %}<span class="bk-dot"></span>{% endif %}
+                        <a href="/user/{{ j.username }}">{{ j.username }}</a>
+                    </span>
+                </td>
+                <td class="num">{{ j.posts_seen }}</td>
+                <td class="num">{{ j.posts_saved }}</td>
+                <td class="num">{{ j.media_saved }}</td>
+                <td class="num">{{ j.pages }}</td>
+                <td class="num">{{ j.completed_runs }}</td>
+                <td>{{ j.oldest or '—' }}</td>
+            </tr>
+            {% if j.message %}
+            <tr><td></td><td colspan="7" class="bk-sub">└ {{ j.message }}</td></tr>
+            {% endif %}
+            {% endfor %}
+        </table>
+        {% endif %}
+
+        <div class="bk-sub" style="margin-top:10px">
+            <b>進捗率（何％）は出せません。</b>アカウントの総投稿数が分からないためです
+            （<code>mediacount</code> は <code>web_profile_info</code> でしか取れず、
+            この運用では叩いていません）。代わりに「どこまで遡ったか」を日付で表示しています。<br>
+            バックフィルは巡回中は待つので、この画面が止まって見えることがあります。
+        </div>
+    </div>
+</div>
+
+{% include '_scripts.html' %}
+<script>
+// 次回時刻の表示。サーバはISO文字列だけ渡し、整形と秒読みはこちらでやる
+// （表示中のページが古い時刻を出したままにならないよう1秒ごとに更新）。
+function fmtAbs(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '—';
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const t = d.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'});
+    if (sameDay) return '今日 ' + t;
+    const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
+    if (d.toDateString() === tomorrow.toDateString()) return '明日 ' + t;
+    return d.toLocaleDateString('ja-JP', {month: 'numeric', day: 'numeric'}) + ' ' + t;
+}
+
+function fmtLeft(ms) {
+    if (ms <= 0) return 'まもなく';
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h > 0) return `あと ${h}時間 ${String(m).padStart(2, '0')}分`;
+    if (m > 0) return `あと ${m}分 ${String(sec).padStart(2, '0')}秒`;
+    return `あと ${sec}秒`;
+}
+
+function tick() {
+    const now = Date.now();
+    document.querySelectorAll('[data-countdown]').forEach(el => {
+        const t = new Date(el.dataset.countdown).getTime();
+        el.textContent = isNaN(t) ? '—' : fmtLeft(t - now);
+    });
+    document.querySelectorAll('[data-abstime]').forEach(el => {
+        const v = el.dataset.abstime;
+        el.textContent = v ? fmtAbs(v) : '—';
+    });
+}
+tick();
+setInterval(tick, 1000);
+
+// 予定時刻を過ぎたらサーバ側の状態も変わっているはずなので取り直す
+setInterval(() => {
+    const past = [...document.querySelectorAll('[data-countdown]')].some(el => {
+        const t = new Date(el.dataset.countdown).getTime();
+        return !isNaN(t) && t - Date.now() < -5000;
+    });
+    if (past) location.reload();
+}, 15000);
+</script>
+</body>
+</html>

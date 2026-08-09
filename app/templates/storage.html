@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ストレージ - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+<style>
+.st-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.st-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);
+        color:var(--text);font-size:12px;cursor:pointer}
+.st-btn:hover{border-color:var(--accent,#1d9bf0)}
+.st-btn.danger{color:#e0245e;border-color:#e0245e44}
+.st-btn:disabled{opacity:.5;cursor:default}
+.st-note{font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.6}
+.st-badge{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;
+          background:var(--surface-hover);color:var(--text-dim);margin-right:4px}
+#st-msg{font-size:12px;margin-top:8px;min-height:16px}
+.st-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+.st-table th{text-align:left;color:var(--text-dim);font-weight:500;padding:4px 6px;
+             border-bottom:1px solid var(--border)}
+.st-table td{padding:4px 6px;border-bottom:1px solid var(--border)}
+.st-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+.st-table a{color:inherit;text-decoration:none}
+.st-table a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>📊 ストレージ</h1>
+    <div class="meta">合計 {{ total_size }}</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'storage' %}
+{% include '_nav.html' %}
+
+<div class="storage-wrap">
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">🧊 画像キャッシュ <span class="st-badge">{{ cache_dir }}</span></h3>
+        <div class="storage-row"><span class="label">ファイル（{{ cache_count }}枚）</span><span class="value">{{ cache_size }}</span></div>
+        <div class="storage-row"><span class="label">🔒 ブックマークで保護中</span><span class="value">{{ protected_count }}枚 / {{ protected_size }}</span></div>
+        <div class="storage-row"><span class="label">{{ retention_days }}日超過（削除対象）</span><span class="value">{{ stale_count }}枚 / {{ stale_size }}</span></div>
+        <div class="st-actions">
+            <button class="st-btn" id="btn-old" onclick="cacheCleanup(null, this)">🧹 {{ retention_days }}日より古い分を削除</button>
+            <button class="st-btn danger" id="btn-all" onclick="cacheCleanup(0, this)">🗑 キャッシュ全削除</button>
+        </div>
+        <div id="st-msg"></div>
+        <div class="st-note">
+            消しても投稿本文とリモート画像URLは残るので、表示はInstagram側の画像に自動でフォールバックします
+            （☁ バッジが付きます）。<br>
+            <b>ブックマーク済みの画像は保護され、削除されません。</b>
+            ブックマークは投稿ごとコピーして保存しているため、キャッシュを消しても内容は残ります。
+        </div>
+    </div>
+
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">💾 保存データ</h3>
+        <div class="storage-row"><span class="label">データベース</span><span class="value">{{ db_size }}</span></div>
+        <div class="storage-row"><span class="label">画像キャッシュ</span><span class="value">{{ cache_size }}</span></div>
+        <div class="storage-row"><span class="label">合計</span><span class="value">{{ total_size }}</span></div>
+        <div class="storage-row"><span class="label">投稿数</span><span class="value">{{ counts.posts }}</span></div>
+        <div class="storage-row"><span class="label">監視対象アカウント</span><span class="value">{{ counts.accounts }}</span></div>
+        <div class="storage-row"><span class="label">ブックマーク</span><span class="value">{{ counts.bookmarks }}</span></div>
+        <div class="storage-row"><span class="label">メディア（ローカル / 未取得）</span><span class="value">{{ counts.media_local }} / {{ counts.media_remote }}</span></div>
+        {% if counts.media_remote %}
+        <div class="st-note" style="margin-top:6px">
+            未取得の {{ counts.media_remote }} 件は <code>scrape</code> を <code>--no-media</code> 無しで
+            実行すると取得できます。
+        </div>
+        {% endif %}
+    </div>
+
+    {% if per_account %}
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">👤 アカウント別</h3>
+        <table class="st-table">
+            <tr><th>アカウント</th><th style="text-align:right">枚数</th><th style="text-align:right">未取得</th><th style="text-align:right">容量</th></tr>
+            {% for a in per_account %}
+            <tr>
+                <td><a href="/user/{{ a.username }}">{{ a.username }}</a></td>
+                <td class="num">{{ a.files }}</td>
+                <td class="num">{% if a.missing %}{{ a.missing }}{% else %}-{% endif %}</td>
+                <td class="num">{{ a.size }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <div class="st-note">容量は <code>media_index.bytes</code> の合計です（重複排除前の見かけ上の値）。</div>
+    </div>
+    {% endif %}
+
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">🖥 ディスク使用状況（ベストエフォート）</h3>
+        <div class="storage-row"><span class="label">使用中</span><span class="value">{{ disk_used }} / {{ disk_total }}</span></div>
+        <div class="storage-row"><span class="label">空き容量</span><span class="value">{{ disk_free }}</span></div>
+        <div class="disk-bar"><div class="fill" style="width:{{ disk_pct }}%"></div></div>
+        <div style="text-align:right;font-size:12px;color:var(--text-dim);margin-top:4px">{{ disk_pct }}% 使用</div>
+    </div>
+</div>
+
+{% include '_scripts.html' %}
+<script>
+async function cacheCleanup(days, btn) {
+    if (days === 0 && !confirm('キャッシュ画像をすべて削除します。\n（ブックマーク済みの画像は保護されます）\nよろしいですか？')) return;
+    const msg = document.getElementById('st-msg');
+    const btns = document.querySelectorAll('.st-btn');
+    btns.forEach(b => b.disabled = true);
+    const label = btn.textContent;
+    btn.textContent = '削除中...';
+    msg.textContent = '';
+    try {
+        const fd = new FormData();
+        if (days !== null) fd.set('days', days);
+        const res = await fetch('/api/cache/cleanup', { method: 'POST', body: fd });
+        const d = await res.json();
+        if (d.ok) {
+            msg.style.color = 'var(--text-dim)';
+            msg.textContent = `✓ ${d.deleted}枚削除 / ${d.freed} 解放（保持 ${d.kept}枚, DB同期 ${d.synced}行）`;
+            setTimeout(() => location.reload(), 1200);
+        } else {
+            msg.style.color = '#e0245e';
+            msg.textContent = '✕ ' + (d.error || '失敗しました');
+            btn.textContent = label;
+            btns.forEach(b => b.disabled = false);
+        }
+    } catch (e) {
+        msg.style.color = '#e0245e';
+        msg.textContent = '✕ 通信エラー';
+        btn.textContent = label;
+        btns.forEach(b => b.disabled = false);
+    }
+}
+</script>
+</body>
+</html>

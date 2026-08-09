@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ミュート - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+<style>
+.mute-list{max-width:900px;margin:0 auto;padding:0 16px}
+.mute-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;
+           padding:14px 16px;margin-bottom:12px}
+.mute-row{display:flex;align-items:center;gap:10px;padding:7px 0;
+          border-bottom:1px solid var(--border)}
+.mute-row:last-child{border-bottom:none}
+.mute-av{width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;
+         background:var(--surface-hover);display:flex;align-items:center;
+         justify-content:center;font-size:11px;color:var(--text-dim)}
+.mute-av img{width:100%;height:100%;object-fit:cover}
+.mute-name{flex:1;min-width:0}
+.mute-name a{color:inherit;text-decoration:none;font-weight:600;font-size:13px}
+.mute-name a:hover{text-decoration:underline}
+.mute-sub{font-size:11px;color:var(--text-dim);margin-top:1px}
+.mute-btn{padding:5px 12px;border-radius:8px;border:1px solid var(--border);
+          background:var(--bg-card);color:var(--text);font-size:12px;cursor:pointer;flex-shrink:0}
+.mute-btn:hover{border-color:var(--accent,#1d9bf0)}
+.mute-btn.on{color:#e0245e;border-color:#e0245e44}
+.mute-btn:disabled{opacity:.5;cursor:default}
+.mute-add{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.mute-add input{flex:1;min-width:180px;padding:7px 10px;border-radius:8px;
+                border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px}
+#mute-msg{font-size:12px;margin-top:8px;min-height:16px;color:var(--text-dim)}
+</style>
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>🔇 ミュート</h1>
+    <div class="meta">{{ muted|length }}件</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'mutes' %}
+{% include '_nav.html' %}
+
+<div class="mute-list">
+    <div class="mute-card">
+        <h3 style="font-size:14px;margin-bottom:8px">ミュート中</h3>
+        {% if muted %}
+        {% for m in muted %}
+        <div class="mute-row" data-user="{{ m.username }}">
+            <div class="mute-av">
+                {% if m.avatar %}<img src="{{ m.avatar }}" alt="">
+                {% else %}{{ m.username[:2] }}{% endif %}
+            </div>
+            <div class="mute-name">
+                <a href="/user/{{ m.username }}">{{ m.full_name or m.username }}</a>
+                <div class="mute-sub">
+                    @{{ m.username }} ・ 投稿 {{ m.n_posts }}件
+                    {% if m.muted_at %} ・ {{ m.muted_at[:16].replace('T',' ') }}{% endif %}
+                    {% if m.mute_reason %} ・ {{ m.mute_reason }}{% endif %}
+                </div>
+            </div>
+            <button class="mute-btn on" onclick="toggleMute('{{ m.username }}', this)">解除</button>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div style="color:var(--text-dim);font-size:13px;padding:8px 0">
+            ミュート中のアカウントはありません。
+        </div>
+        {% endif %}
+
+        <div class="mute-add">
+            <input type="text" id="mute-input" placeholder="アカウント名かプロフィールURL"
+                   onkeydown="if(event.key==='Enter')muteFromInput()">
+            <button class="mute-btn" onclick="muteFromInput()">🔇 ミュートに追加</button>
+        </div>
+        <div id="mute-msg"></div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.6">
+            ミュートすると<b>取得が行われなくなり</b>、フィードとギャラリーからも消えます。<br>
+            取得済みの投稿は削除されません。解除すれば元通り表示されます。<br>
+            ユーザーページ <code>/user/名前</code> には直接アクセスすれば見られます。
+        </div>
+    </div>
+
+    {% if candidates %}
+    <div class="mute-card">
+        <h3 style="font-size:14px;margin-bottom:8px">投稿のあるアカウント</h3>
+        {% for cd in candidates %}
+        <div class="mute-row" data-user="{{ cd.username }}">
+            <div class="mute-av">{{ cd.username[:2] }}</div>
+            <div class="mute-name">
+                <a href="/user/{{ cd.username }}">{{ cd.username }}</a>
+                <div class="mute-sub">投稿 {{ cd.n_posts }}件</div>
+            </div>
+            <button class="mute-btn" onclick="toggleMute('{{ cd.username }}', this)">🔇 ミュート</button>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+{% include '_scripts.html' %}
+<script>
+async function toggleMute(username, btn) {
+    const msg = document.getElementById('mute-msg');
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = '...';
+    try {
+        const res = await fetch('/api/mute/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.ok) {
+            msg.style.color = 'var(--text-dim)';
+            msg.textContent = d.muted
+                ? `🔇 ${d.username} をミュートしました`
+                : `🔊 ${d.username} のミュートを解除しました`;
+            setTimeout(() => location.reload(), 700);
+        } else {
+            msg.style.color = '#e0245e';
+            msg.textContent = '✕ ' + (d.error || `HTTP ${res.status}`);
+            btn.textContent = label; btn.disabled = false;
+        }
+    } catch (e) {
+        msg.style.color = '#e0245e';
+        msg.textContent = '✕ 通信エラー';
+        btn.textContent = label; btn.disabled = false;
+    }
+}
+
+function muteFromInput() {
+    const el = document.getElementById('mute-input');
+    let v = (el.value || '').trim();
+    if (!v) return;
+    // URL や @ 付きでも受け付ける（サーバ側でも正規化する）
+    const m = v.match(/instagram\.com\/([^/?#]+)/);
+    if (m) v = m[1];
+    v = v.replace(/^@/, '').replace(/\/+$/, '').toLowerCase();
+    if (!v) return;
+    el.value = '';
+    toggleMute(v, document.querySelector('.mute-add .mute-btn'));
+}
+</script>
+</body>
+</html>

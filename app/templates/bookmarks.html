@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ブックマーク - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import post_card %}
+<header>
+    <div class="header-left"><h1>★ ブックマーク</h1>
+    <div class="meta">{{ posts|length }}件</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'bookmarks' %}
+{% include '_nav.html' %}
+
+<main id="feed">
+    {% if posts %}
+        {% for p in posts %}{{ post_card(p) }}{% endfor %}
+    {% else %}
+        <div class="empty">ブックマークはまだありません</div>
+    {% endif %}
+</main>
+{% include '_scripts.html' %}
+</body>
+</html>

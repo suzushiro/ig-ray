@@ -1,0 +1,237 @@
+# ig-ray / docker-compose.yml
+#
+# 設計方針:
+#   - **既定では何も常駐しない**。IGは叩きすぎると即ブロックなので、
+#     `docker compose up` で勝手に取得が始まらないようにしてある。
+#     取得はすべて `docker compose run --rm ...` で明示的に叩く。
+#   - worker と web を分離。サーバのIPが弾かれる場合に、
+#     worker だけ別ネットワークで動かして DB を持ち回れるようにするため。
+#   - Python は 3.12 に固定（母艦は 3.14 で instaloader 検証済み環境外）。
+#
+# 使い方:
+#   ※ 一発実行のサービスは profiles: ["tools"] を付けてある。
+#     `docker compose run` は対象の profile を自動で有効にするので指定は不要だが、
+#     `docker compose up` では起動しない（= 意図せず scrape が走らない）。
+#     これが無いと `--profile cron up -d` が scrape も一緒に起動してしまい、
+#     cron と二重に巡回して database is locked や並行アクセスの原因になる。
+#
+#   # profile 付きのサービスは `docker compose build` ではビルドされない。
+#   # worker イメージが古いまま動く事故になるので、ビルドは必ず profile 付きで。
+#   docker compose --profile cron --profile tools build
+#   docker compose run --rm login                    # セッション作成
+#   docker compose run --rm diag 対象アカウント名      # 429の切り分け
+#   docker compose run --rm accounts list            # 監視対象の管理
+#   docker compose run --rm accounts purge 対象アカウント名  # 完全削除（破壊的）
+#   docker compose run --rm backfill add 対象アカウント名     # 全件バックフィル
+#
+#   # ビルドは backfill profile も含めること
+#   docker compose --profile cron --profile tools --profile backfill build
+#   docker compose run --rm scrape 対象アカウント名 --limit 3 --no-media
+#   docker compose run --rm shell                    # 中で sqlite3 を叩く
+
+x-worker-base: &worker-base
+  build:
+    context: .
+    dockerfile: Dockerfile.worker
+  image: ig-ray-worker:latest
+  # /data はホスト側と共有するので、母艦のユーザーに合わせる。
+  # id -u / id -g が 1000 以外なら .env で上書きすること。
+  user: "${IG_RAY_UID:-1000}:${IG_RAY_GID:-1000}"
+  volumes:
+    - ./data:/data
+  environment:
+    IG_RAY_DB: ${IG_RAY_DB:-}
+    IG_RAY_SESSIONS: /data/sessions
+    IG_RAY_CACHE: /data/cache
+    IG_RAY_LOGIN_USER: "${IG_RAY_LOGIN_USER:-}"
+    IG_RAY_DOWNLOAD_VIDEOS: "${IG_RAY_DOWNLOAD_VIDEOS:-0}"
+    IG_RAY_SLEEP_MIN: "${IG_RAY_SLEEP_MIN:-3}"
+    IG_RAY_SLEEP_MAX: "${IG_RAY_SLEEP_MAX:-8}"
+    IG_RAY_MAX_SLEEP: "${IG_RAY_MAX_SLEEP:-60}"
+    IG_RAY_POSTS_ONLY: "${IG_RAY_POSTS_ONLY:-0}"
+    IG_RAY_FETCH_LOCATION: "${IG_RAY_FETCH_LOCATION:-0}"
+    IG_RAY_VIDEO_URL_PROBE: "${IG_RAY_VIDEO_URL_PROBE:-0}"
+    # --- 全件バックフィル ---
+    IG_RAY_BACKFILL_PAGE_SLEEP_MIN: "${IG_RAY_BACKFILL_PAGE_SLEEP_MIN:-600}"
+    IG_RAY_BACKFILL_PAGE_SLEEP_MAX: "${IG_RAY_BACKFILL_PAGE_SLEEP_MAX:-1200}"
+    IG_RAY_BACKFILL_KNOWN_STREAK: "${IG_RAY_BACKFILL_KNOWN_STREAK:-30}"
+    IG_RAY_BACKFILL_QUIET_SEC: "${IG_RAY_BACKFILL_QUIET_SEC:-180}"
+    IG_RAY_BACKFILL_RATELIMIT_BACKOFF: "${IG_RAY_BACKFILL_RATELIMIT_BACKOFF:-3600}"
+    IG_RAY_PROXY: "${IG_RAY_PROXY:-}"
+    # --- 出口の分離（別回線側のプロキシ経由で出す・任意） -----------------
+    # requests / instaloader は標準でこの環境変数を見る。
+    # **worker 系にだけ入れる**（web はローカルのファイルを返すだけで外に出ない）。
+    # 入れ忘れたコンテナは IPv6 で au 側から出てしまい分離が崩れるので、
+    # 追加したら必ず `docker compose run --rm ipcheck` で出口IPを確認すること。
+    HTTP_PROXY: "${HTTP_PROXY:-}"
+    HTTPS_PROXY: "${HTTPS_PROXY:-}"
+    http_proxy: "${HTTP_PROXY:-}"
+    https_proxy: "${HTTPS_PROXY:-}"
+    NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1}"
+    no_proxy: "${NO_PROXY:-localhost,127.0.0.1}"
+    # ipcheck の自動判定用。これが無いと --expect を毎回手で渡すことになる。
+    # （v4.3 まで compose 側の参照が抜けていて .env に書いても届いていなかった）
+    IG_RAY_EXPECT_EGRESS_IP: "${IG_RAY_EXPECT_EGRESS_IP:-}"
+    # cron サービスのシェルが読む（他サービスでは未使用）
+    IG_RAY_INTERVAL: "${IG_RAY_INTERVAL:-21600}"
+    IG_RAY_CRON_LIMIT: "${IG_RAY_CRON_LIMIT:-6}"
+    TZ: "${TZ:-Asia/Tokyo}"
+  restart: "no"
+
+services:
+
+  # --- セッション作成（対話） --------------------------------------------
+  # docker compose run --rm login
+  login:
+    <<: *worker-base
+    profiles: ["tools"]
+    command: ["python", "make_session.py"]
+    stdin_open: true
+    tty: true
+
+  # --- ブラウザのクッキーからセッションを作る -----------------------------
+  # docker compose run --rm import-cookies
+  # instaloader のログインが拒否される場合の回避策。
+  # ブラウザの開発者ツールから sessionid 等をコピーして貼り付ける。
+  import-cookies:
+    <<: *worker-base
+    profiles: ["tools"]
+    command: ["python", "import_cookies.py"]
+    stdin_open: true
+    tty: true
+
+  # --- 出口IPの確認 --------------------------------------------------------
+  # docker compose run --rm ipcheck
+  #   → 分離先回線のグローバルIPが返れば成功
+  ipcheck:
+    <<: *worker-base
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/tini", "--", "python", "check_egress.py"]
+    command: []
+
+  # --- 429の原因切り分け ---------------------------------------------------
+  # docker compose run --rm diag 対象アカウント名
+  diag:
+    <<: *worker-base
+    profiles: ["tools"]
+    volumes:
+      - ./data:/data
+      - ./dev:/dev-scripts:ro
+    entrypoint: ["/usr/bin/tini", "--", "python", "/dev-scripts/diag_session.py"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
+
+  # --- 投稿の生データを覗く（DBに書かない） -------------------------------
+  # docker compose run --rm probe 対象アカウント名 --limit 12
+  probe:
+    <<: *worker-base
+    profiles: ["tools"]
+    volumes:
+      - ./data:/data
+      - ./dev:/dev-scripts:ro
+    entrypoint: ["/usr/bin/tini", "--", "python", "/dev-scripts/probe_posts.py"]
+    command: []
+
+  # --- 監視対象アカウントの管理 -------------------------------------------
+  # docker compose run --rm accounts add ユーザー名
+  # docker compose run --rm accounts list
+  accounts:
+    <<: *worker-base
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/tini", "--", "python", "seed_accounts.py"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
+
+  # --- 取得（明示実行） ----------------------------------------------------
+  # docker compose run --rm scrape 対象アカウント名 --limit 3 --no-media
+  # 引数を省略すると accounts テーブルの有効なものを巡回する
+  scrape:
+    <<: *worker-base
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/tini", "--", "python", "ig_scraper.py"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
+
+  # --- 全件バックフィルの管理（一発実行） ---------------------------------
+  # docker compose run --rm backfill add 対象アカウント名
+  # docker compose run --rm backfill list
+  backfill:
+    <<: *worker-base
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/tini", "--", "python", "backfill.py"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
+
+  # --- 全件バックフィルのワーカー（常駐・既定で無効） ----------------------
+  # 有効にする場合: docker compose --profile backfill up -d
+  #
+  # ※ イテレータを生かしたまま常駐させるのが肝。
+  #    「1ページ取って終了、次回 thaw で再開」にすると、NodeIterator の
+  #    コンストラクタが毎回1ページ目を取りに行くぶんリクエストが倍増する。
+  #    freeze はクラッシュ保険としてページごとにDBへ書くだけ（無料）。
+  #
+  # ※ cron と同時に動いてよい。巡回中は backfill 側が待つ（活動ゲート）。
+  backfill-worker:
+    <<: *worker-base
+    profiles: ["backfill"]
+    restart: unless-stopped
+    entrypoint: ["/usr/bin/tini", "--", "python", "backfill.py", "run"]
+    command: []
+
+  # --- デバッグ用シェル ----------------------------------------------------
+  # docker compose run --rm shell
+  #   → sqlite3 /data/ig_ray.db
+  shell:
+    <<: *worker-base
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/tini", "--", "bash"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
+    stdin_open: true
+    tty: true
+
+  # --- 定期巡回（任意・既定で無効） ----------------------------------------
+  # 有効にする場合: docker compose --profile cron up -d
+  #
+  # ※ IGはブロックされやすいので、まず手動運用で安定を確認してから。
+  #    間隔は最低でも数時間空けること。
+  cron:
+    <<: *worker-base
+    profiles: ["cron"]
+    restart: unless-stopped
+    entrypoint: ["/usr/bin/tini", "--", "bash", "-c"]
+    # $$ は compose の変数展開を抜けてシェルに渡すためのエスケープ。
+    # $ 一つだと compose が自分の変数として空文字に置換してしまう。
+    command:
+      - |
+        INTERVAL="$${IG_RAY_INTERVAL:-21600}"
+        LIMIT="$${IG_RAY_CRON_LIMIT:-6}"
+        echo "巡回モード: $${INTERVAL}秒ごと / 1アカウント $${LIMIT}件"
+        while true; do
+          echo "--- $$(date -Iseconds) ---"
+          python ig_scraper.py --cron --limit "$$LIMIT" || \
+            echo "失敗しました。scrape_log を確認してください。"
+          sleep "$$INTERVAL"
+        done
+
+  # --- 表示層 -------------------------------------------------------------
+  # docker compose up -d web   → http://localhost:8079
+  #
+  # web は読み取り専用の想定。書き込みは worker 側（scrape / accounts）だけ。
+  # 同じ SQLite を同時に書かないこと。
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: ig-ray-web:latest
+    user: "${IG_RAY_UID:-1000}:${IG_RAY_GID:-1000}"
+    volumes:
+      - ./data:/data
+    environment:
+      IG_RAY_DB: ${IG_RAY_DB:-}
+      IG_RAY_CACHE: /data/cache
+      IG_RAY_CACHE_RETENTION_DAYS: "${IG_RAY_CACHE_RETENTION_DAYS:-30}"
+      TZ: "${TZ:-Asia/Tokyo}"
+    ports:
+      - "${IG_RAY_WEB_PORT:-8079}:8079"
+    restart: unless-stopped

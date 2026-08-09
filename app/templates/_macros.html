@@ -1,0 +1,81 @@
+{# insta-ray の投稿カード。
+   X-Ray の tweet_card から RT / 引用RT / 自己リプライ / スペースを削除し、
+   カルーセル・ハッシュタグ・ジオタグを足したもの。 #}
+
+{% macro post_card(p, show_bookmark=True) %}
+<div class="tweet" data-owner="{{ p.owner_username }}">
+    <div class="tweet-head">
+        <div class="avatar">
+            {# degraded 運用ではプロフィール画像が無いので頭2文字で代替 #}
+            {% if p.avatar %}
+            <img src="{{ p.avatar }}" alt="{{ p.owner_username }}" loading="lazy"
+                 onerror="this.onerror=null;this.style.display='none';this.parentNode.textContent='{{ (p.owner_username or '?')[:2] }}'">
+            {% else %}
+            {{ (p.owner_username or '?')[:2] }}
+            {% endif %}
+        </div>
+        <a href="/user/{{ p.owner_username }}" style="text-decoration:none;color:inherit">
+            <span class="tweet-name">{{ p.owner_username }}</span>
+        </a>
+        <span class="tweet-time">{{ p.date_jst }}</span>
+        {% if p.is_carousel %}<span class="type-pill">🖼 {{ p.imgs|length }}枚</span>{% endif %}
+        {% if p.is_video %}<span class="type-pill">▶ 動画</span>{% endif %}
+    </div>
+
+    {% if p.location %}
+    <div class="post-location">📍 {{ p.location }}</div>
+    {% endif %}
+
+    {% if p.caption %}
+    <div class="tweet-content">{{ p.caption }}</div>
+    {% endif %}
+
+    {% if p.hashtags %}
+    <div class="tweet-cats">
+        {% for h in p.hashtags %}<span class="cat-pill">#{{ h }}</span>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if p.imgs %}
+    {# data-vids: 各画像に対応する再生URL。動画でなければ null。
+       動画本体は保存していないので、再生は Instagram 側へ飛ばす。 #}
+    <div class="tweet-media {% if p.imgs|length == 1 %}single{% else %}multi{% endif %}"
+         data-imgs="{{ p.imgs_b64 }}" data-handle="{{ p.owner_username }}"
+         data-dt="{{ p.date_compact }}"
+         data-vids="{{ p.vids_b64 }}">
+        {% for m in p.imgs %}
+        <div class="media-cell">
+            <img src="{{ m.src }}" loading="lazy" data-idx="{{ loop.index0 }}"
+                 onclick="imgClick(this)" alt="">
+            {% if m.is_video %}
+            <a class="media-badge play" href="{{ p.url }}" target="_blank" rel="noopener"
+               title="Instagramで再生" onclick="event.stopPropagation()">▶ 再生</a>
+            {% endif %}
+            {% if not m.is_local %}<span class="media-badge remote" title="未キャッシュ（リモート表示）">☁</span>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="tweet-footer">
+        <span class="stat">♥ {{ p.likes if p.likes is not none else '-' }}</span>
+        <span class="stat">💬 {{ p.comments if p.comments is not none else '-' }}</span>
+        <div class="footer-right">
+            {% if show_bookmark %}
+            <button class="bm-btn {% if p.is_bookmarked %}marked{% endif %}"
+                    data-sc="{{ p.shortcode }}" onclick="toggleBookmark(this)"
+                    title="ブックマーク">{% if p.is_bookmarked %}★{% else %}☆{% endif %}</button>
+            <button class="mute-toggle" data-user="{{ p.owner_username }}"
+                    onclick="openMuteDialog('{{ p.owner_username }}')"
+                    title="{{ p.owner_username }} をミュート">🔇</button>
+            {% endif %}
+            {% if p.imgs %}
+            <button class="dl-btn" data-imgs="{{ p.imgs_b64 }}"
+                    data-handle="{{ p.owner_username }}" data-dt="{{ p.date_compact }}"
+                    onclick="dlAllBtn(this)">↓ {{ p.imgs|length }}枚</button>
+            {% endif %}
+            <a href="{{ p.url }}" target="_blank" class="tweet-link">Instagramで見る →</a>
+        </div>
+    </div>
+</div>
+{% endmacro %}

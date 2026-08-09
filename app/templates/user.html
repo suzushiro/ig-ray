@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ account.username }} - IG-Ray</title>
+<script>(function(){const t=localStorage.getItem('instaray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import post_card %}
+<header>
+    <div class="header-left"><h1><a href="/" style="text-decoration:none;color:inherit">← IG-Ray</a></h1></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+
+<div class="profile-head">
+    <div class="profile-top">
+        <div class="profile-avatar">
+            {% if account.avatar %}<img src="{{ account.avatar }}" alt="">
+            {% else %}<span style="font-size:20px">{{ (account.username or '?')[:2] }}</span>{% endif %}
+        </div>
+        <div>
+            <div class="profile-name">{{ account.full_name or account.username }}</div>
+            <div class="profile-handle">@{{ account.username }}</div>
+            {% if account.followers %}
+            <div class="meta" style="margin-top:4px">{{ account.followers }} フォロワー</div>
+            {% elif not account.full_name %}
+            <div class="meta" style="margin-top:4px">プロフィール情報は未取得</div>
+            {% endif %}
+        </div>
+    </div>
+    {% if account.is_muted %}
+    <div class="health health-warn" style="margin:8px 0">
+        🔇 このアカウントはミュート中です。取得もフィード表示も行われません。
+        <button class="st-btn" style="margin-left:8px;padding:4px 10px;border-radius:8px;
+                border:1px solid var(--border);background:var(--bg-card);color:var(--text);
+                font-size:12px;cursor:pointer"
+                onclick="userToggleMute('{{ account.username }}', this)">解除する</button>
+    </div>
+    {% endif %}
+    <div class="profile-stats">
+        <span><b>{{ stats.total or 0 }}</b> 投稿</span>
+        <span><b>{{ stats.media_count or 0 }}</b> メディア</span>
+        {% if stats.carousels %}<span><b>{{ stats.carousels }}</b> カルーセル</span>{% endif %}
+        {% if stats.videos %}<span><b>{{ stats.videos }}</b> 動画</span>{% endif %}
+        <span><b>{{ stats.total_likes or 0 }}</b> ♥合計</span>
+        <span><b>{{ stats.total_comments or 0 }}</b> 💬合計</span>
+        {% if stats.per_day %}<span><b>{{ stats.per_day }}</b> 投稿/日</span>{% endif %}
+    </div>
+    {% if stats.oldest_jst %}
+    <div class="profile-period">📅 保存範囲: {{ stats.oldest_jst }} 〜 {{ stats.newest_jst }}</div>
+    {% endif %}
+    <form class="date-filter" method="get">
+        <input type="date" name="from" value="{{ date_from }}">
+        <span style="color:var(--text-dim)">〜</span>
+        <input type="date" name="to" value="{{ date_to }}">
+        <button type="submit">絞り込み</button>
+        {% if date_from or date_to %}<a href="/user/{{ account.username }}" style="font-size:12px;color:var(--text-dim)">クリア</a>{% endif %}
+    </form>
+</div>
+
+<main id="feed">
+    {% if posts %}
+        {% for p in posts %}{{ post_card(p) }}{% endfor %}
+        {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
+    {% else %}
+        <div class="empty">投稿がありません</div>
+    {% endif %}
+    <div class="infinite-status" id="infinite-status"></div>
+</main>
+{% include '_scripts.html' %}
+<script>
+async function userToggleMute(username, btn) {
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/mute/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.ok) { location.reload(); return; }
+        alert('失敗: ' + (d.error || `HTTP ${res.status}`));
+    } catch (e) { alert('通信エラー'); }
+    btn.disabled = false;
+}
+</script>
+</body>
+</html>

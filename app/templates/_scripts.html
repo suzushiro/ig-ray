@@ -1,0 +1,434 @@
+<div class="lb-wrap" id="lb">
+    <div class="lb-toolbar">
+        <a class="lb-tbtn" id="lb-play" href="#" target="_blank" rel="noopener"
+           style="display:none;text-decoration:none">▶ Instagramで再生 ↗</a>
+        <button class="lb-tbtn" id="lb-dl" onclick="lbDownload()">↓ 保存</button>
+        <button class="lb-tbtn" onclick="lbClose()">✕</button>
+    </div>
+    <div class="lb-body" id="lb-body" onclick="lbBodyClick(event)">
+        <button class="lb-nav-btn lb-prev" onclick="lbNav(-1)">‹</button>
+        <img id="lb-img" src="" alt="">
+        <button class="lb-nav-btn lb-next" onclick="lbNav(1)">›</button>
+    </div>
+    <div class="lb-counter" id="lb-counter"></div>
+</div>
+
+<div class="dlg-wrap" id="mute-dlg" onclick="muteDlgBackdrop(event)">
+    <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="mute-dlg-title">
+        <h3 id="mute-dlg-title">🔇 <span id="mute-dlg-user"></span> をミュート</h3>
+        <p class="dlg-body">
+            このアカウントの<b>取得が停止</b>し、フィードとギャラリーから消えます。<br>
+            <span class="dlg-note">取得済みの投稿は削除されません。解除すれば元通り表示されます。</span>
+        </p>
+        <input type="text" id="mute-dlg-reason" placeholder="理由（任意）"
+               onkeydown="if(event.key==='Enter')muteDlgConfirm()">
+        <div class="dlg-msg" id="mute-dlg-msg"></div>
+        <div class="dlg-actions">
+            <button class="dlg-btn" onclick="closeMuteDialog()">キャンセル</button>
+            <button class="dlg-btn danger" id="mute-dlg-ok" onclick="muteDlgConfirm()">ミュートする</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// テーマ
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('instaray-theme', next);
+    updateThemeBtn(next);
+}
+function updateThemeBtn(theme) {
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = theme === 'dark' ? '☀️ ライト' : '🌙 ダーク';
+}
+updateThemeBtn(document.documentElement.getAttribute('data-theme'));
+
+// ライトボックス
+let lbImgs = [], lbIdx = 0, lbHandle = '', lbDt = '', lbNames = [];
+// 各画像に対応する「再生ページのURL」。動画でなければ null。
+// 動画本体はDLしていないので、再生は Instagram 側に任せる。
+let lbVideos = [];
+// 上下キーでの投稿移動用。いまどのコンテナを開いているかを覚えておく。
+let lbSource = null;
+
+function lbOpen(imgs, idx, handle, dt, names, source, videos) {
+    lbImgs = imgs; lbIdx = idx; lbHandle = handle; lbDt = dt; lbNames = names || [];
+    lbVideos = videos || [];
+    if (source !== undefined) lbSource = source;
+    lbShow();
+    document.getElementById('lb').classList.add('open');
+    document.addEventListener('keydown', lbKey);
+}
+
+// ページ上のメディアコンテナを表示順で列挙する。
+// フィード/ユーザーページは .tweet-media（1投稿=1コンテナ）、
+// ギャラリーは .gallery-item（1画像=1コンテナ）。
+function lbContainers() {
+    return [...document.querySelectorAll('.tweet-media, .gallery-item')];
+}
+
+// いまギャラリー（1アイテム=1画像のグリッド）を見ているか
+function lbInGallery() {
+    return !!(lbSource && lbSource.classList.contains('gallery-item'));
+}
+
+// グリッドの1行あたりの列数を数える。
+// CSS のレスポンシブで変わるので、実際の位置から求める。
+function lbGridColumns() {
+    const all = lbContainers().filter(el => el.classList.contains('gallery-item'));
+    if (all.length < 2) return 1;
+    const top0 = all[0].getBoundingClientRect().top;
+    let cols = 1;
+    for (let i = 1; i < all.length; i++) {
+        // 同じ行なら top がほぼ同じ（端数を許容）
+        if (Math.abs(all[i].getBoundingClientRect().top - top0) > 4) break;
+        cols++;
+    }
+    return Math.max(1, cols);
+}
+
+// 指定した数だけコンテナを進む（ギャラリーの行移動にも使う）
+function lbJump(step) {
+    if (!lbSource || !step) return false;
+    const all = lbContainers();
+    const i = all.indexOf(lbSource);
+    if (i === -1) return false;
+
+    let j = i + step;
+    // 行移動で行き過ぎたときは端に寄せる（何も起きないより自然）
+    if (j < 0) j = (step < 0 && i > 0) ? 0 : -1;
+    if (j >= all.length) j = (step > 0 && i < all.length - 1) ? all.length - 1 : -1;
+    if (j < 0 || j === i) return false;
+
+    const next = all[j];
+    let imgs;
+    try { imgs = JSON.parse(atob(next.dataset.imgs)); } catch (e) { return false; }
+    if (!imgs || !imgs.length) return false;
+
+    const startIdx = step > 0 ? 0 : imgs.length - 1;
+    lbOpen(imgs, startIdx, next.dataset.handle || '', next.dataset.dt || '',
+           lbNamesFor(next, imgs), next, lbVideosFor(next));
+    next.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    return true;
+}
+
+// 上下キー: 前後の投稿へ移動する。
+// ギャラリーは1アイテム=1画像なので、上下は「1行ぶん」動かす。
+function lbNavPost(d) {
+    if (lbInGallery()) {
+        lbJump(d * lbGridColumns());
+        return;
+    }
+    lbJump(d);
+}
+
+// data-vids から動画URL配列を読む（無ければ空配列）
+function lbVideosFor(w) {
+    if (!w.dataset.vids) return [];
+    try { return JSON.parse(atob(w.dataset.vids)); } catch (e) { return []; }
+}
+
+// ギャラリー用のファイル名を組み立てる（imgClick と共通化）
+function lbNamesFor(w, imgs) {
+    if (!w.dataset.tid) return [];
+    const ext = (imgs[0].split('?')[0].split('.').pop() || 'jpg').slice(0, 4);
+    return [`${w.dataset.handle}_${w.dataset.tid}_${w.dataset.fidx || 1}.${ext}`];
+}
+function lbShow() {
+    document.getElementById('lb-img').src = lbImgs[lbIdx];
+    const multi = lbImgs.length > 1;
+    const prev = document.querySelector('.lb-prev'), next = document.querySelector('.lb-next');
+    if (prev) prev.style.display = multi ? '' : 'none';
+    if (next) next.style.display = multi ? '' : 'none';
+    document.getElementById('lb-counter').textContent = multi ? `${lbIdx+1} / ${lbImgs.length}` : '';
+    const btn = document.getElementById('lb-dl'); btn.textContent = '↓ 保存'; btn.disabled = false;
+
+    // 動画ならツールバーに再生リンクを出す（サムネしか持っていないため）
+    const play = document.getElementById('lb-play');
+    const vurl = lbVideos[lbIdx];
+    if (play) {
+        play.style.display = vurl ? '' : 'none';
+        if (vurl) play.href = vurl;
+    }
+}
+function lbClose() {
+    document.getElementById('lb').classList.remove('open');
+    document.removeEventListener('keydown', lbKey);
+    lbSource = null;
+}
+// 左右キー: 投稿内に複数枚あればその中を移動。
+// 1枚しか無い場合（ギャラリーや単体画像の投稿）は隣のコンテナへ進む。
+// そうしないとギャラリーで左右キーが何も起きないため。
+function lbNav(d) {
+    if (lbImgs.length > 1) {
+        lbIdx = (lbIdx + d + lbImgs.length) % lbImgs.length;
+        lbShow();
+        return;
+    }
+    lbJump(d);
+}
+function lbBodyClick(e) { if (e.target === document.getElementById('lb-body')) lbClose(); }
+
+// 左右: 同じ投稿内の画像を切り替え / 上下: 前後の投稿へ
+function lbKey(e) {
+    switch (e.key) {
+        case 'Escape':     lbClose(); break;
+        case 'ArrowRight': lbNav(1); break;
+        case 'ArrowLeft':  lbNav(-1); break;
+        case 'ArrowDown':  lbNavPost(1); break;
+        case 'ArrowUp':    lbNavPost(-1); break;
+        default: return;   // 関係ないキーは既定動作を残す
+    }
+    // 上下キーの背面スクロールを止める（ライトボックスを開いている間だけ）
+    e.preventDefault();
+}
+function sanitize(s) { return (s || '').replace(/[\\/:*?"<>|]/g, '_'); }
+function lbFileName() {
+    // 明示名があれば最優先。無ければ handle_date_idx、それも無ければ image_idx
+    if (lbNames[lbIdx]) return sanitize(lbNames[lbIdx]);
+    const h = sanitize(lbHandle), d = sanitize(lbDt);
+    if (h || d) return `${h || 'x'}_${d || 'img'}_${lbIdx+1}.jpg`;
+    return `image_${lbIdx+1}.jpg`;
+}
+async function lbDownload() {
+    const btn = document.getElementById('lb-dl'); btn.textContent = '取得中...'; btn.disabled = true;
+    try { await dlOne(lbImgs[lbIdx], lbFileName()); btn.textContent = '✓ 保存済み';
+        setTimeout(() => { btn.textContent = '↓ 保存'; btn.disabled = false; }, 2000);
+    } catch { btn.textContent = '↓ 保存'; btn.disabled = false; }
+}
+function imgClick(imgEl) {
+    const w = imgEl.closest('.tweet-media') || imgEl.closest('.gallery-item');
+    const imgs = JSON.parse(atob(w.dataset.imgs));
+    lbOpen(imgs, parseInt(imgEl.dataset.idx || 0),
+           w.dataset.handle || '', w.dataset.dt || '', lbNamesFor(w, imgs), w,
+           lbVideosFor(w));
+}
+async function dlOne(url, fn) {
+    const r = await fetch(url); const b = await r.blob();
+    const ext = b.type.split('/')[1] || 'jpg';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+    a.download = fn.includes('.') ? fn : `${fn}.${ext}`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+}
+async function dlAllBtn(btnEl) {
+    const imgs = JSON.parse(atob(btnEl.dataset.imgs));
+    const handle = btnEl.dataset.handle, dt = btnEl.dataset.dt;
+    btnEl.textContent = '取得中...'; btnEl.disabled = true;
+    try {
+        for (let i = 0; i < imgs.length; i++) { await dlOne(imgs[i], `${handle}_${dt}_${i+1}.jpg`); await new Promise(r=>setTimeout(r,300)); }
+        btnEl.classList.add('done'); btnEl.textContent = `✓ ${imgs.length}枚完了`;
+        setTimeout(() => { btnEl.classList.remove('done'); btnEl.textContent = `↓ ${imgs.length}枚`; btnEl.disabled = false; }, 2500);
+    } catch { btnEl.textContent = `↓ ${imgs.length}枚`; btnEl.disabled = false; }
+}
+
+// ブックマークトグル
+async function toggleBookmark(btn) {
+    const sc = btn.dataset.sc;
+    try {
+        const res = await fetch('/api/bookmark/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ shortcode: sc })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+            btn.classList.toggle('marked', data.bookmarked);
+            btn.textContent = data.bookmarked ? '★' : '☆';
+        } else {
+            // 黙って無視すると「押しても何も起きない」に見えるので必ず知らせる
+            const msg = data.error || `HTTP ${res.status}`;
+            btn.title = 'ブックマーク失敗: ' + msg;
+            btn.textContent = '⚠';
+            console.error('bookmark failed', res.status, data);
+            setTimeout(() => {
+                btn.textContent = btn.classList.contains('marked') ? '★' : '☆';
+            }, 1500);
+        }
+    } catch (e) {
+        console.error(e);
+        btn.textContent = '⚠';
+        btn.title = 'ブックマーク失敗: 通信エラー';
+        setTimeout(() => {
+            btn.textContent = btn.classList.contains('marked') ? '★' : '☆';
+        }, 1500);
+    }
+}
+
+// --- ミュート確認ダイアログ ---
+let muteDlgUser = null;
+
+function openMuteDialog(username) {
+    muteDlgUser = username;
+    document.getElementById('mute-dlg-user').textContent = username;
+    document.getElementById('mute-dlg-reason').value = '';
+    document.getElementById('mute-dlg-msg').textContent = '';
+    const ok = document.getElementById('mute-dlg-ok');
+    ok.disabled = false; ok.textContent = 'ミュートする';
+    document.getElementById('mute-dlg').classList.add('open');
+    document.addEventListener('keydown', muteDlgKey);
+    // 入力欄ではなくキャンセル側にフォーカスを置く（誤爆防止）
+    setTimeout(() => document.getElementById('mute-dlg-reason').focus(), 30);
+}
+
+function closeMuteDialog() {
+    document.getElementById('mute-dlg').classList.remove('open');
+    document.removeEventListener('keydown', muteDlgKey);
+    muteDlgUser = null;
+}
+
+function muteDlgBackdrop(e) {
+    if (e.target === document.getElementById('mute-dlg')) closeMuteDialog();
+}
+
+function muteDlgKey(e) {
+    if (e.key === 'Escape') { closeMuteDialog(); e.preventDefault(); }
+}
+
+// ミュートしたアカウントのカードを画面から取り除く（リロードしない）
+function removeCardsOf(username) {
+    let n = 0;
+    document.querySelectorAll(`.tweet[data-owner="${username}"]`).forEach(el => {
+        el.remove(); n++;
+    });
+    document.querySelectorAll(`.gallery-item[data-handle="${username}"]`).forEach(el => {
+        el.remove(); n++;
+    });
+    return n;
+}
+
+async function muteDlgConfirm() {
+    if (!muteDlgUser) return;
+    const user = muteDlgUser;
+    const ok = document.getElementById('mute-dlg-ok');
+    const msg = document.getElementById('mute-dlg-msg');
+    const reason = document.getElementById('mute-dlg-reason').value.trim();
+    ok.disabled = true; ok.textContent = '処理中...';
+    msg.textContent = '';
+    try {
+        const res = await fetch('/api/mute/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // muted を明示する（トグルだと既にミュート済みのとき解除されてしまう）
+            body: JSON.stringify({ username: user, muted: true,
+                                   reason: reason || null })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.ok && d.muted) {
+            closeMuteDialog();
+            const n = removeCardsOf(user);
+            showToast(d.changed
+                ? `🔇 ${user} をミュートしました（${n}件を非表示）`
+                : `🔇 ${user} は既にミュート中です`);
+        } else {
+            msg.textContent = '✕ ' + (d.error || `HTTP ${res.status}`);
+            ok.disabled = false; ok.textContent = 'ミュートする';
+        }
+    } catch (e) {
+        msg.textContent = '✕ 通信エラー';
+        ok.disabled = false; ok.textContent = 'ミュートする';
+    }
+}
+
+function showToast(text) {
+    let t = document.getElementById('ir-toast');
+    if (!t) {
+        t = document.createElement('div');
+        t.id = 'ir-toast';
+        t.className = 'ir-toast';
+        document.body.appendChild(t);
+    }
+    t.textContent = text;
+    t.classList.add('show');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+// 初回transition無効でチカチカ防止
+document.documentElement.classList.add('no-transition');
+requestAnimationFrame(() => { requestAnimationFrame(() => { document.documentElement.classList.remove('no-transition'); }); });
+
+// タブ/ナビのstickyトップをheader高さに合わせる
+function adjustStickyTops() {
+    const header = document.querySelector('header');
+    const nav = document.querySelector('.xnav');
+    const tabs = document.querySelector('.tabs');
+    if (!header) return;
+    const hH = header.offsetHeight;
+    if (nav) nav.style.top = hH + 'px';
+    if (tabs) tabs.style.top = (hH + (nav ? nav.offsetHeight : 0)) + 'px';
+}
+adjustStickyTops();
+window.addEventListener('resize', adjustStickyTops);
+</script>
+
+<script>
+// ===== 無限スクロール =====
+// data-next-url を持つ番兵(.infinite-sentinel)が見えたら次ページの partial を取得して追記。
+(function () {
+    let loading = false;
+    let done = false;
+
+    function statusEl() { return document.getElementById('infinite-status'); }
+
+    async function loadNext(sentinel) {
+        if (loading || done) return;
+        const url = sentinel.dataset.nextUrl;
+        if (!url) { done = true; return; }
+        loading = true;
+        const st = statusEl();
+        if (st) st.textContent = '読み込み中…';
+
+        try {
+            const sep = url.includes('?') ? '&' : '?';
+            const res = await fetch(url + sep + 'partial=1', {
+                headers: { 'X-Requested-With': 'fetch' }
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const html = await res.text();
+
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html.trim();
+
+            const container = sentinel.parentNode;  // #feed（TL or grid）
+            const newSentinel = tmp.querySelector('.infinite-sentinel');
+
+            // 番兵以外のノードを本体に移す
+            Array.from(tmp.childNodes).forEach(node => {
+                if (node.nodeType === 1 && node.classList.contains('infinite-sentinel')) return;
+                container.insertBefore(node, sentinel);
+            });
+
+            // 古い番兵を差し替え or 終了
+            sentinel.remove();
+            if (newSentinel && newSentinel.dataset.nextUrl) {
+                container.appendChild(newSentinel);
+                observer.observe(newSentinel);
+            } else {
+                done = true;
+                if (st) st.textContent = 'すべて読み込みました';
+            }
+            if (st && !done) st.textContent = '';
+        } catch (e) {
+            if (st) st.textContent = '読み込みに失敗しました（スクロールで再試行）';
+            console.error('infinite scroll:', e);
+        } finally {
+            loading = false;
+        }
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) loadNext(entry.target);
+        });
+    }, { rootMargin: '600px 0px' });  // 手前で先読み
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.infinite-sentinel').forEach(s => observer.observe(s));
+    });
+})();
+
+// 画像削除UIは未移植（cache_utils の削除機構が insta-ray に無いため）
+
+</script>
