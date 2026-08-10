@@ -38,6 +38,8 @@ dev/backup_page_check.py  バックアップ状況画面のテスト（コンテ
 dev/video_check.py        GraphVideo 取り扱いのテスト（コンテナ非同梱）
 dev/rename_db.py          DBファイル名の移行ヘルパ（コンテナ非同梱）
 dev/privacy_check.py      公開ファイルへの環境固有情報の混入検査（コンテナ非同梱）
+dev/share_check.py        Tumblr共有のテスト（コンテナ非同梱）
+deploy/                   外部公開の設定例（Cloudflare Tunnel）
 NOTES.example.md          作業メモの雛形（実物 NOTES.md は .gitignore 済み）
 dev/lightbox_check.js     ライトボックスのキー操作テスト（jsdom・コンテナ非同梱）
 ```
@@ -59,12 +61,13 @@ python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 43項目
-python3 dev/privacy_check.py     # 15項目（公開ファイルの情報漏れ検査）
+python3 dev/share_check.py       # 65項目
+python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
 npm i -D jsdom && node dev/lightbox_check.js   # 79項目
 ```
 
-計 710 項目通過。前者が extract_media / post_to_record / save_posts /
+計 777 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -656,6 +659,103 @@ instaloader の `NodeIterator` は `freeze()` / `thaw()` でページ送りの�
 **初回は必ず最後まで走る。** cron が上位N件を既に取っているので、
 初回から判定を効かせると先頭で止まってしまう。
 `completed_runs > 0` のときだけ有効にしている。
+
+## Tumblr 共有（任意）
+
+投稿カードの `t` ボタン → 確認画面（キャプション・タグを編集）→
+Tumblr の投稿画面が**画像を読み込んだ状態で**開く。そこで最終確認して投稿する。
+
+OAuth も API キーも不要。投稿は必ず人の目を二段通る
+（自前の確認画面 ＋ Tumblr の投稿画面）。
+
+### 仕組み
+
+Tumblr の[シェアツール](https://help.tumblr.com/knowledge-base/share-button-documentation/)
+に URL パラメータを渡してポップアップを開く。
+
+```
+https://www.tumblr.com/widgets/share/tool
+  ?posttype=photo
+  &content=<画像URL1>,<画像URL2>   ← カンマ区切り。配列形式 content[0]= は通らない
+  &canonicalUrl=<元投稿のURL>      ← これが出典になる
+  &caption=<HTML可>
+  &tags=<カンマ区切り>
+```
+
+**決定的な制約: `content` の画像URLは Tumblr のサーバー側から取得される。**
+LAN内のURLや Instagram CDN の直リンク（Referer 制限あり）では失敗する。
+そこで ig-ray 側にトークン付きの一時公開URLを作り、**そこだけ**を外部公開する。
+
+```
+ブラウザ（LAN内）        Tumblr のサーバー
+     |                        |
+     | ①確認画面でトークン発行 |
+     | ②シェアツールを開く ---->|
+     |                        | ③ content の画像URLを取得
+     |                        |     ↓ Cloudflare Tunnel
+     |                        |   ig-ray web（/share 系のみ公開）
+```
+
+### 設定
+
+```bash
+IG_RAY_PUBLIC_SHARE_BASE_URL=https://<公開ホスト>   # 未設定なら機能まるごと無効
+IG_RAY_PUBLIC_SHARE_HOST=<公開ホスト>               # 省略時は BASE_URL から自動抽出
+IG_RAY_SHARE_TOKEN_TTL_MIN=60
+```
+
+外部公開の設定例は `deploy/cloudflared-config.example.yml`。
+**実ドメインは `.env` と `/etc/cloudflared/config.yml` にだけ書く**（`NOTES.md` に控える）。
+
+### エンドポイント
+
+| | |
+|---|---|
+| `POST /api/share/prepare` | トークン発行。`share_url` / `image_urls[]` / `source_url` を返す |
+| `GET /share/<token>` | OGP付きプレビュー（投稿には必須ではない） |
+| `GET /share-img/<token>/<n>` | **Tumblr から叩かれる本命。**画像を配信 |
+
+`payload` は**発行時のスナップショット**。配信時にDBを引き直さないので、
+共有中に元データが変わっても公開されるのは確定した内容だけになる。
+
+### 公開ホストのガード（最後の砦）
+
+`before_request` で、公開ホスト名宛のリクエストは `/share` と `/share-img`
+以外すべて 404 にする。**リバースプロキシの path 指定を間違えても本体は守られる。**
+スクレイパーの操作画面やバックアップ画面が外に出ると洒落にならないので、
+ingress の設定だけに頼らない。
+
+### 共有できない投稿
+
+`t` ボタンは**ローカルに実体のある静止画が1枚以上ある投稿にだけ**出る。
+
+- リモートURLしかない投稿 … Tumblr から取得できない
+- 動画のみの投稿 … サムネしか持っていない
+
+### 移植時に踏んだ罠
+
+**X-Ray では一度この機能を作って削除している。** 敗因は
+`content[0]=..` の配列形式と、CDN 直リンクを渡していたこと。後者が本質で、
+自前で配信できる画像URLを用意するまでこの機能は成立しない。
+
+**Jinja のマクロは呼び出し元のコンテキストを引き継がない。**
+
+```jinja
+{% from '_macros.html' import post_card with context %}
+```
+
+`with context` が無いと `context_processor` で入れた `share_enabled` が
+マクロ内から見えず、**ボタンが一切描画されない**。全テンプレートに必要。
+
+さらに**この不具合はテストでも見逃しやすい。**
+`'openTumblrShare' in html` はJS関数の定義にマッチして通ってしまう。
+検証は必ず**実ボタンの数**を数えること:
+
+```python
+html.count('onclick="openTumblrShare')   # 共有可能な投稿の数だけあるはず
+```
+
+`dev/share_check.py` はこれを固定してあり、`with context` を外すと落ちる。
 
 ## 既知の未確認事項
 

@@ -20,7 +20,7 @@ import config
 
 DB_PATH = config.db_path()
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 # --------------------------------------------------------------------------
@@ -171,6 +171,22 @@ DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_log_user_time ON scrape_log(username, ended_at DESC)",
+
+    # Tumblr 共有用の一時トークン
+    #
+    # payload は**発行時のスナップショット**（画像パス・キャプション・タグ・
+    # 元投稿URL）。配信時にDBを引き直さないので、共有中に元データが変わっても
+    # 公開されるのは確定した内容だけになる。
+    """
+    CREATE TABLE IF NOT EXISTS share_tokens (
+        token       TEXT PRIMARY KEY,
+        shortcode   TEXT NOT NULL,
+        payload     TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_share_tokens_exp ON share_tokens(expires_at)",
 
     # 全件バックフィル（丸ごとバックアップ）のジョブ管理
     #
@@ -703,6 +719,62 @@ def backfill_next(conn):
         "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'ratelimited' THEN 1 "
         "  ELSE 2 END, created_at LIMIT 1").fetchone()
     return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------
+# 共有トークン
+# --------------------------------------------------------------------------
+
+def create_share_token(conn, token, shortcode, payload, ttl_minutes):
+    """
+    共有トークンを発行する。payload は dict（JSONで保存）。
+
+    ttl_minutes=0 を許すのはテストのため（発行直後に失効した状態を作れる）。
+    """
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO share_tokens (token, shortcode, payload, created_at, expires_at) "
+        "VALUES (?,?,?,?,?)",
+        (token, shortcode, json.dumps(payload, ensure_ascii=False),
+         now.isoformat(), (now + timedelta(minutes=float(ttl_minutes))).isoformat()))
+    conn.commit()
+
+
+def get_share_payload(conn, token):
+    """
+    有効なトークンなら payload(dict) を返す。無効・失効なら None。
+
+    **失効判定はここで一元化する。** 呼び出し側それぞれで比較すると
+    片方だけ判定を忘れて、期限切れの画像が配信され続ける事故になる。
+    """
+    if not token:
+        return None
+    row = conn.execute(
+        "SELECT payload, expires_at FROM share_tokens WHERE token = ?",
+        (token,)).fetchone()
+    if row is None:
+        return None
+    try:
+        exp = datetime.fromisoformat(row["expires_at"])
+    except (TypeError, ValueError):
+        return None
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp <= datetime.now(timezone.utc):
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+
+
+def purge_expired_share_tokens(conn):
+    """失効済みトークンを掃除する。発行のついでに呼ぶ。"""
+    cur = conn.execute(
+        "DELETE FROM share_tokens WHERE expires_at <= ?",
+        (datetime.now(timezone.utc).isoformat(),))
+    conn.commit()
+    return cur.rowcount
 
 
 def post_is_archived(conn, shortcode):

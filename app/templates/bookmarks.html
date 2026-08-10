@@ -7,7 +7,7 @@
 {% include '_style.html' %}
 </head>
 <body>
-{% from '_macros.html' import post_card %}
+{% from '_macros.html' import post_card with context %}
 <header>
     <div class="header-left"><h1>★ ブックマーク</h1>
     <div class="meta">{{ posts|length }}件</div></div>

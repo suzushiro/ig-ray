@@ -17,10 +17,11 @@ X-Ray との主な違い:
 import base64
 import json
 import os
+import secrets
 import time
 from datetime import datetime, timezone, timedelta
 
-from flask import (Flask, g, jsonify, redirect, render_template, request,
+from flask import (Flask, abort, g, jsonify, redirect, render_template, request,
                    send_from_directory, url_for)
 
 import cache_utils
@@ -31,6 +32,25 @@ JST = timezone(timedelta(hours=9))
 
 CACHE_DIR = config.env("CACHE", "/data/cache")
 PER_PAGE = 60
+
+# --- Tumblr 共有 --------------------------------------------------------
+# 未設定なら機能まるごと無効（ボタンも出ない、APIも404）。
+# Tumblr のシェアツールは **Tumblr のサーバー側から画像URLを取りに来る**ため、
+# LAN内のURLでは成立しない。外部から到達できるベースURLが要る。
+PUBLIC_SHARE_BASE_URL = config.env("PUBLIC_SHARE_BASE_URL", "").rstrip("/")
+# 公開ホスト名。省略時は BASE_URL から自動抽出する。
+PUBLIC_SHARE_HOST = (config.env("PUBLIC_SHARE_HOST", "") or "").split(":")[0].lower()
+if not PUBLIC_SHARE_HOST and PUBLIC_SHARE_BASE_URL:
+    try:
+        from urllib.parse import urlparse
+        PUBLIC_SHARE_HOST = (urlparse(PUBLIC_SHARE_BASE_URL).hostname or "").lower()
+    except Exception:
+        PUBLIC_SHARE_HOST = ""
+SHARE_TOKEN_TTL_MIN = config.env_float("SHARE_TOKEN_TTL_MIN", 60)
+SHARE_ENABLED = bool(PUBLIC_SHARE_BASE_URL)
+
+# 公開ホスト経由で通してよいルート。ここに無いものは404にする。
+SHARE_PUBLIC_PREFIXES = ("/share/", "/share-img/")
 
 app = Flask(__name__)
 
@@ -223,6 +243,12 @@ def format_post(c, d, bookmarked=None, media_from_bookmark=False):
     d["avatar"] = avatar_map(c).get(d.get("owner_username"))
     d["owner_muted"] = d.get("owner_username") in muted_set(c)
     d["is_bookmarked"] = bool(bookmarked and d.get("shortcode") in bookmarked)
+    # Tumblr 共有の可否。**ローカルに実体のある静止画が1枚以上**必要。
+    # リモートURLは Instagram CDN の Referer 制限で Tumblr から取得できず、
+    # 動画はサムネしか持っていないので対象外。
+    d["has_local"] = any(i.get("is_local") and not i.get("is_video")
+                         for i in d["imgs"])
+
     d["imgs_b64"] = base64.b64encode(
         json.dumps([i["src"] for i in d["imgs"]]).encode()
     ).decode() if d["imgs"] else ""
@@ -247,6 +273,167 @@ def serve_cache(filename):
 # --------------------------------------------------------------------------
 # フィード
 # --------------------------------------------------------------------------
+
+@app.before_request
+def _restrict_public_host():
+    """
+    公開ホスト名で来たリクエストは共有系ルートだけ許可する。
+
+    **これが最後の砦。** リバースプロキシ（Cloudflare Tunnel）側の path 指定を
+    間違えても、公開ドメイン経由では `/share` 系以外に到達できない。
+    スクレイパーの操作画面やバックアップ画面が外に出ると洒落にならないので、
+    ingress の設定だけに頼らない。
+    """
+    if not PUBLIC_SHARE_HOST:
+        return None
+    host = (request.host or "").split(":")[0].lower()
+    if host != PUBLIC_SHARE_HOST:
+        return None
+    if any(request.path.startswith(p) for p in SHARE_PUBLIC_PREFIXES):
+        return None
+    abort(404)
+
+
+@app.context_processor
+def _inject_share_flags():
+    """テンプレート全体から共有機能の有効/無効を見えるようにする。"""
+    return {"share_enabled": SHARE_ENABLED}
+
+
+def _share_source_url(shortcode):
+    """
+    出典として Tumblr に載るURL。
+
+    X-Ray には `tweets.url` 列があったが、ig-ray の posts には無いので組み立てる。
+    """
+    return f"https://www.instagram.com/p/{shortcode}/"
+
+
+def _local_media_paths(c, shortcode):
+    """
+    共有できる（＝ローカルに実体がある）画像の絶対パスを順番に返す。
+
+    リモートURLは対象外。Instagram の CDN は Referer 制限があり
+    Tumblr のサーバーからは取得できないため、共有しても失敗する。
+    動画も除外する（サムネしか持っておらず、mp4 は既定で落としていない）。
+    """
+    out = []
+    for r in c.execute(
+        "SELECT media_index, local_path, is_video FROM media_index "
+        "WHERE shortcode = ? AND local_path IS NOT NULL ORDER BY media_index",
+        (shortcode,),
+    ):
+        if r["is_video"]:
+            continue
+        # CACHE_DIR の外は配信しない（cache_url と同じ判定を通す）
+        if cache_url(r["local_path"]):
+            out.append(r["local_path"])
+    return out
+
+
+@app.route("/api/share/prepare", methods=["POST"])
+def api_share_prepare():
+    """
+    共有用のトークンを発行し、Tumblr に渡す絶対URLを返す。
+
+    payload に確定内容をスナップショットしておき、配信時はDBを引き直さない。
+    """
+    if not SHARE_ENABLED:
+        return jsonify({"ok": False, "error": "共有機能が無効です"}), 404
+
+    data = request.get_json(silent=True) or {}
+    shortcode = (data.get("shortcode") or "").strip()
+    if not shortcode:
+        return jsonify({"ok": False, "error": "shortcode がありません"}), 400
+
+    c = conn()
+    paths = _local_media_paths(c, shortcode)
+    if not paths:
+        return jsonify({
+            "ok": False,
+            "error": "ローカルに画像がないため共有できません",
+        }), 400
+
+    token = secrets.token_urlsafe(16)
+    source_url = _share_source_url(shortcode)
+    payload = {
+        "shortcode": shortcode,
+        "paths": paths,
+        "caption": (data.get("caption") or "").strip(),
+        "tags": (data.get("tags") or "").strip(),
+        "source_url": source_url,
+    }
+
+    try:
+        db.purge_expired_share_tokens(c)
+        db.create_share_token(c, token, shortcode, payload, SHARE_TOKEN_TTL_MIN)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"トークン発行に失敗: {e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "share_url": f"{PUBLIC_SHARE_BASE_URL}/share/{token}",
+        "image_urls": [f"{PUBLIC_SHARE_BASE_URL}/share-img/{token}/{i}"
+                       for i in range(len(paths))],
+        "source_url": source_url,
+        "expires_in_min": int(SHARE_TOKEN_TTL_MIN),
+    })
+
+
+@app.route("/share/<token>")
+def share_page(token):
+    """
+    OGP付きのプレビューページ。
+
+    Tumblr への投稿自体は content で画像URLを直接渡すのでこれは必須ではないが、
+    共有リンクを直接開いたときの見え方として機能する。
+    """
+    if not SHARE_ENABLED:
+        abort(404)
+    payload = db.get_share_payload(conn(), token)
+    if not payload:
+        abort(404)
+
+    n = len(payload.get("paths") or [])
+    return render_template(
+        "share.html",
+        token=token,
+        count=n,
+        caption=payload.get("caption") or "",
+        tags=payload.get("tags") or "",
+        source_url=payload.get("source_url") or "",
+        image_urls=[f"{PUBLIC_SHARE_BASE_URL}/share-img/{token}/{i}"
+                    for i in range(n)],
+    )
+
+
+@app.route("/share-img/<token>/<int:n>")
+def share_image(token, n):
+    """
+    payload に記録したパスの画像を配信する。**Tumblr から叩かれる本命。**
+
+    パスは発行時のスナップショットを使い、DBを引き直さない。
+    CACHE_DIR 相対に直してから send_from_directory に渡す
+    （ファイル名だけにするとサブディレクトリを失って配信できなくなる）。
+    """
+    if not SHARE_ENABLED:
+        abort(404)
+    payload = db.get_share_payload(conn(), token)
+    if not payload:
+        abort(404)
+
+    paths = payload.get("paths") or []
+    if n < 0 or n >= len(paths):
+        abort(404)
+
+    url = cache_url(paths[n])          # CACHE_DIR 外なら None が返る
+    if not url:
+        abort(404)
+    rel = url[len("/cache/"):]
+    if not os.path.exists(os.path.join(CACHE_DIR, rel)):
+        abort(404)
+    return send_from_directory(CACHE_DIR, rel)
+
 
 @app.route("/")
 def index():

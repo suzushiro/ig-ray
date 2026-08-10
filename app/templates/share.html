@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>共有画像</title>
+
+{# 外部に公開されるのはこのページと /share-img だけ。
+   payload のスナップショットしか出さないので、DBの中身も
+   アカウント名も投稿本文も晒さない。 #}
+<meta name="robots" content="noindex, nofollow">
+<meta property="og:type" content="article">
+<meta property="og:title" content="共有画像">
+{% if image_urls %}
+<meta property="og:image" content="{{ image_urls[0] }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{{ image_urls[0] }}">
+{% endif %}
+{% if caption %}<meta property="og:description" content="{{ caption }}">{% endif %}
+{% if source_url %}<meta property="og:url" content="{{ source_url }}">{% endif %}
+
+<style>
+:root { color-scheme: light dark; }
+body {
+    margin: 0; padding: 24px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                 "Noto Sans JP", sans-serif;
+    background: #16181c; color: #e7e9ea;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+img { max-width: min(900px, 100%); border-radius: 10px; display: block; }
+p { margin: 0; max-width: 700px; line-height: 1.7; font-size: 14px; }
+.muted { color: #8b98a5; font-size: 12px; }
+a { color: #1d9bf0; }
+</style>
+</head>
+<body>
+
+{% for u in image_urls %}
+<img src="{{ u }}" alt="" loading="lazy">
+{% endfor %}
+
+{% if caption %}<p>{{ caption }}</p>{% endif %}
+
+{% if tags %}<p class="muted">{{ tags }}</p>{% endif %}
+
+{% if source_url %}
+<p class="muted">出典: <a href="{{ source_url }}" rel="noopener">{{ source_url }}</a></p>
+{% endif %}
+
+<p class="muted">このリンクは一定時間で失効します（{{ count }}枚）。</p>
+
+</body>
+</html>

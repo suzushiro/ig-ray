@@ -120,22 +120,29 @@ def tracked_files():
     except (OSError, subprocess.SubprocessError):
         pass
 
-    # git が無い場合のフォールバック（.gitignore を素朴に解釈）
-    ignored = set()
+    # git が無い場合のフォールバック（.gitignore を素朴に解釈）。
+    # **パス付きの指定（dev/privacy_words.txt）も効かせること。**
+    # 名前だけで判定していると、要注意語リスト自身を検査対象にしてしまい
+    # 「.gitignore 済みなのに落ちる」という誤検知になる。
+    names, paths = set(), set()
     gi = os.path.join(ROOT, ".gitignore")
     if os.path.exists(gi):
         for line in open(gi, encoding="utf-8"):
             line = line.strip()
-            if line and not line.startswith("#"):
-                ignored.add(line.rstrip("/"))
+            if not line or line.startswith("#"):
+                continue
+            line = line.rstrip("/")
+            (paths if "/" in line else names).add(line)
 
     files = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames
-                       if d not in ignored and d != ".git"
-                       and d != "node_modules"]
+                       if d not in names and d != ".git" and d != "node_modules"]
         for fn in filenames:
-            if fn in ignored or fn.endswith(".pyc") or fn.endswith(".zip"):
+            rel = os.path.relpath(os.path.join(dirpath, fn), ROOT).replace(os.sep, "/")
+            if fn in names or rel in paths:
+                continue
+            if fn.endswith(".pyc") or fn.endswith(".zip"):
                 continue
             files.append(os.path.join(dirpath, fn))
     return files
@@ -252,6 +259,42 @@ def test_env_example_has_no_real_values():
           not re.search(r"^HTTPS?_PROXY=\S", text, re.M))
 
 
+def test_share_domain_not_committed(files):
+    print("\n[6] 共有機能の実ドメインが混ざっていないか")
+    # Tumblr 共有では外部公開ドメインを使う。実ドメインは .env と
+    # /etc/cloudflared/config.yml にだけ書き、リポジトリには入れない。
+    # 例示は RFC 2606 の予約ドメイン（example.com 等）を使う。
+    allowed = re.compile(r"(example\.(com|org|net)|example|localhost|"
+                         r"<[^>]+>|\$\{|www\.instagram\.com|"
+                         r"www\.tumblr\.com|help\.tumblr\.com|"
+                         r"api\.anthropic\.com|github\.com|cdninstagram)")
+    host_like = re.compile(r"https?://([A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
+
+    hits = []
+    for path in files:
+        rel = os.path.relpath(path, ROOT)
+        if not (rel.endswith((".md", ".yml", ".yaml")) or
+                rel.endswith(".example") or rel == ".env.example"):
+            continue
+        for i, line in enumerate(
+                open(path, encoding="utf-8", errors="replace").read().splitlines(), 1):
+            for m in host_like.finditer(line):
+                if not allowed.search(m.group(0)):
+                    hits.append((rel, i, m.group(0)))
+
+    check("ドキュメント・設定例に実ドメインが無い", not hits,
+          "; ".join(f"{f}:{n} {h}" for f, n, h in hits[:5]))
+
+    # 共有の環境変数が .env.example で有効化されたままになっていないこと
+    p = os.path.join(ROOT, ".env.example")
+    if os.path.exists(p):
+        text = open(p, encoding="utf-8").read()
+        check("PUBLIC_SHARE_BASE_URL がコメントアウトされている",
+              not re.search(r"^IG_RAY_PUBLIC_SHARE_BASE_URL=\S", text, re.M))
+        check("PUBLIC_SHARE_HOST がコメントアウトされている",
+              not re.search(r"^IG_RAY_PUBLIC_SHARE_HOST=\S", text, re.M))
+
+
 def main():
     files = tracked_files()
     print(f"検査対象: {len(files)} ファイル")
@@ -261,6 +304,7 @@ def main():
     test_notes_ignored()
     test_readme_points_to_notes()
     test_env_example_has_no_real_values()
+    test_share_domain_not_committed(files)
 
     print(f"\n{'=' * 50}")
     print(f"PASS {len(PASS)} / FAIL {len(FAIL)}")

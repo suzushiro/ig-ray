@@ -7,7 +7,7 @@
 {% include '_style.html' %}
 </head>
 <body>
-{% from '_macros.html' import post_card %}
+{% from '_macros.html' import post_card with context %}
 <header>
     <div class="header-left"><h1><a href="/" style="text-decoration:none;color:inherit">← IG-Ray</a></h1></div>
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>

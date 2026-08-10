@@ -30,6 +30,31 @@
     </div>
 </div>
 
+{% if share_enabled %}
+{# Tumblr 共有の確認モーダル。
+   **背景クリックでは閉じない。** 入力途中のキャプションが消えると困るため、
+   閉じるのは ✕ / キャンセル / Escape のみ。
+   モーダル内のイベントは stopPropagation して、裏のライトボックスの
+   キーハンドラに矢印キーが届かないようにする。 #}
+<div class="dlg-wrap" id="tmb-dlg">
+    <div class="dlg tmb-dlg" role="dialog" aria-modal="true" aria-labelledby="tmb-dlg-title"
+         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">
+        <h3 id="tmb-dlg-title">t Tumblr に共有</h3>
+        <div class="tmb-preview" id="tmb-preview"></div>
+        <label class="tmb-label" for="tmb-caption">キャプション</label>
+        <textarea id="tmb-caption" rows="3" placeholder="（任意）"></textarea>
+        <label class="tmb-label" for="tmb-tags">タグ（カンマ区切り）</label>
+        <input type="text" id="tmb-tags" placeholder="（任意） photography, instagram">
+        <div class="dlg-note" id="tmb-src"></div>
+        <div class="dlg-msg" id="tmb-msg"></div>
+        <div class="dlg-actions">
+            <button class="dlg-btn" onclick="closeTumblrShare()">キャンセル</button>
+            <button class="dlg-btn primary" id="tmb-ok" onclick="tmbConfirm()">Tumblr を開く</button>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <script>
 // テーマ
 function toggleTheme() {
@@ -431,4 +456,100 @@ window.addEventListener('resize', adjustStickyTops);
 
 // 画像削除UIは未移植（cache_utils の削除機構が insta-ray に無いため）
 
+// --- Tumblr 共有 -------------------------------------------------------
+//
+// 仕組み: Tumblr のシェアツールに URL パラメータを渡してポップアップを開く。
+//   https://help.tumblr.com/knowledge-base/share-button-documentation/
+//
+// **content はカンマ区切りの1パラメータ。** content[0]=..&content[1]=.. の
+// 配列形式では通らない（X-Ray で一度これを踏んで機能ごと削除している）。
+//
+// **画像URLは Tumblr のサーバー側から取得される。** そのため LAN内のURLや
+// Instagram CDN の直リンク（Referer制限あり）では失敗する。
+// prepare が返す一時公開URL（トークン付き）だけを渡すこと。
+let tmbShortcode = null;
+
+function openTumblrShare(shortcode) {
+    // 共有機能が無効なときはモーダル自体が描画されていない。
+    // （JS は常に定義しておく。<script> 内に Jinja を書くと
+    //   dev/lightbox_check.js の eval が構文エラーで落ちる）
+    if (!document.getElementById('tmb-dlg')) return;
+    tmbShortcode = shortcode;
+    document.getElementById('tmb-caption').value = '';
+    document.getElementById('tmb-tags').value = '';
+    document.getElementById('tmb-msg').textContent = '';
+    document.getElementById('tmb-src').textContent =
+        'https://www.instagram.com/p/' + shortcode + '/ が出典として付きます';
+
+    // カード上の画像をそのままプレビューに使う（追加リクエストなし）
+    const prev = document.getElementById('tmb-preview');
+    prev.innerHTML = '';
+    const card = document.querySelector(`.tweet .tmb-btn[data-sc="${shortcode}"]`);
+    const tweet = card ? card.closest('.tweet') : null;
+    if (tweet) {
+        tweet.querySelectorAll('.tweet-media img').forEach(img => {
+            const t = document.createElement('img');
+            t.src = img.src;
+            prev.appendChild(t);
+        });
+    }
+
+    const ok = document.getElementById('tmb-ok');
+    ok.disabled = false; ok.textContent = 'Tumblr を開く';
+    document.getElementById('tmb-dlg').classList.add('open');
+    document.addEventListener('keydown', tmbKey, true);
+    setTimeout(() => document.getElementById('tmb-caption').focus(), 30);
+}
+
+function closeTumblrShare() {
+    const dlg = document.getElementById('tmb-dlg');
+    if (dlg) dlg.classList.remove('open');
+    document.removeEventListener('keydown', tmbKey, true);
+    tmbShortcode = null;
+}
+
+function tmbKey(e) {
+    // Escape だけ拾い、それ以外はライトボックスへ流さない（矢印で裏が動くのを防ぐ）
+    if (e.key === 'Escape') { closeTumblrShare(); e.preventDefault(); }
+    e.stopPropagation();
+}
+
+async function tmbConfirm() {
+    if (!tmbShortcode) return;
+    const ok = document.getElementById('tmb-ok');
+    const msg = document.getElementById('tmb-msg');
+    const caption = document.getElementById('tmb-caption').value.trim();
+    const tags = document.getElementById('tmb-tags').value.trim();
+
+    ok.disabled = true; ok.textContent = '準備中...';
+    msg.textContent = '';
+
+    let data;
+    try {
+        const res = await fetch('/api/share/prepare', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({shortcode: tmbShortcode, caption: caption, tags: tags})
+        });
+        data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    } catch (err) {
+        msg.textContent = '失敗: ' + err.message;
+        ok.disabled = false; ok.textContent = 'Tumblr を開く';
+        return;
+    }
+
+    const params = new URLSearchParams();
+    params.set('posttype', 'photo');
+    params.set('content', (data.image_urls || []).join(','));   // カンマ区切り
+
+    const srcUrl = data.source_url;
+    if (srcUrl) params.set('canonicalUrl', srcUrl);             // これが出典になる
+    if (caption) params.set('caption', srcUrl ? `<a href="${srcUrl}">${caption}</a>` : caption);
+    if (tags) params.set('tags', tags);
+
+    window.open('https://www.tumblr.com/widgets/share/tool?' + params.toString(),
+                '_blank', 'width=540,height=600');
+    closeTumblrShare();
+}
 </script>

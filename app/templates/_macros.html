@@ -69,6 +69,13 @@
                     onclick="openMuteDialog('{{ p.owner_username }}')"
                     title="{{ p.owner_username }} をミュート">🔇</button>
             {% endif %}
+            {# Tumblr 共有。ローカル画像が1枚以上ないと Tumblr 側から取得できない。
+               share_enabled はマクロを `with context` で import しないと見えない。 #}
+            {% if share_enabled and p.has_local %}
+            <button class="tmb-btn" data-sc="{{ p.shortcode }}"
+                    onclick="openTumblrShare('{{ p.shortcode }}')"
+                    title="Tumblr に共有">t</button>
+            {% endif %}
             {% if p.imgs %}
             <button class="dl-btn" data-imgs="{{ p.imgs_b64 }}"
                     data-handle="{{ p.owner_username }}" data-dt="{{ p.date_compact }}"

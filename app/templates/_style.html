@@ -411,6 +411,32 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .dlg-btn.danger { color: #e0245e; border-color: #e0245e55; }
 .dlg-btn.danger:hover { background: #e0245e; color: #fff; border-color: #e0245e; }
 .dlg-btn:disabled { opacity: .5; cursor: default; }
+.dlg-btn.primary { color: #fff; background: var(--accent, #1d9bf0);
+                   border-color: var(--accent, #1d9bf0); }
+.dlg-btn.primary:hover { filter: brightness(1.08); }
+
+/* --- Tumblr 共有 --- */
+.tmb-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-dim); border-radius: 6px; padding: 3px 10px;
+    font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+    line-height: 1.5; transition: background 0.1s;
+}
+.tmb-btn:hover { background: #35465c; color: #fff; border-color: #35465c; }
+.tmb-dlg { max-width: 460px; width: 92vw; }
+.tmb-dlg textarea, .tmb-dlg input[type=text] {
+    width: 100%; box-sizing: border-box; margin: 2px 0 8px;
+    padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text);
+    font-size: 13px; font-family: inherit; resize: vertical;
+}
+.tmb-label { display: block; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.tmb-preview {
+    display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 6px;
+}
+.tmb-preview img {
+    height: 84px; border-radius: 6px; object-fit: cover; flex: none;
+}
 
 .ir-toast {
     position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(12px);

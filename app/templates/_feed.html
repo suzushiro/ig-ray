@@ -1,4 +1,4 @@
 {# 無限スクロール用: 投稿カード列だけを返すパーシャル（index / user 共通） #}
-{% from '_macros.html' import post_card %}
+{% from '_macros.html' import post_card with context %}
 {% for p in posts %}{{ post_card(p) }}{% endfor %}
 {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}

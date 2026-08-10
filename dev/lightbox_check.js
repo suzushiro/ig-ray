@@ -35,6 +35,13 @@ try {
 // b64: 日本語ハンドルも通るように encodeURIComponent 経由
 const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64');
 
+// テンプレートには Jinja のタグが混ざりうる。eval する前に落とす。
+// （{% if %} が <script> に入ると Unexpected token '%' で落ちる）
+function stripJinja(src) {
+    return src.replace(/\{%[\s\S]*?%\}/g, '')
+              .replace(/\{\{[\s\S]*?\}\}/g, '');
+}
+
 function buildDom(kind) {
     let body;
     if (kind === 'feed') {
@@ -99,7 +106,7 @@ function buildDom(kind) {
         observe() {} unobserve() {} disconnect() {}
     };
     dom.window.localStorage.setItem('instaray-theme', 'light');
-    dom.window.eval(code);
+    dom.window.eval(stripJinja(code));
     return dom;
 }
 

@@ -219,6 +219,7 @@ services:
   #
   # web は読み取り専用の想定。書き込みは worker 側（scrape / accounts）だけ。
   # 同じ SQLite を同時に書かないこと。
+  # 共有機能は web だけが使う（worker は外へ出すものが無い）
   web:
     build:
       context: .
@@ -231,6 +232,10 @@ services:
       IG_RAY_DB: ${IG_RAY_DB:-}
       IG_RAY_CACHE: /data/cache
       IG_RAY_CACHE_RETENTION_DAYS: "${IG_RAY_CACHE_RETENTION_DAYS:-30}"
+      # Tumblr 共有。未設定なら機能まるごと無効（ボタンも出ない）
+      IG_RAY_PUBLIC_SHARE_BASE_URL: "${IG_RAY_PUBLIC_SHARE_BASE_URL:-}"
+      IG_RAY_PUBLIC_SHARE_HOST: "${IG_RAY_PUBLIC_SHARE_HOST:-}"
+      IG_RAY_SHARE_TOKEN_TTL_MIN: "${IG_RAY_SHARE_TOKEN_TTL_MIN:-60}"
       TZ: "${TZ:-Asia/Tokyo}"
     ports:
       - "${IG_RAY_WEB_PORT:-8079}:8079"
