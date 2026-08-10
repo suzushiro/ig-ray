@@ -242,6 +242,18 @@ def test_buttons_rendered(cl):
     check("VIDONLY のボタンは出ない", "openTumblrShare('VIDONLY')" not in h)
     check("共有モーダルが描画されている", 'id="tmb-dlg"' in h)
 
+    # --- Tumblr の仕様変更対応（2026-08）---
+    # 複数枚の自動添付が廃止された（1枚なら今もフェッチされる。tcpdumpで実測）。
+    # 対応: モーダルで1枚選択 → content には選んだ1枚だけ渡す。
+    check("1枚選択の変数がある", "tmbSelected" in h)
+    check("複数枚の注記要素がある", 'id="tmb-multi-note"' in h)
+    check("content に選んだ1枚だけ渡している",
+          "params.set('content', pick)" in h)
+    check("全枚数を join で渡す旧実装に戻っていない",
+          "image_urls || []).join(',')" not in h.replace(
+              "join(',') に戻すだけ", ""))
+    check("復活時の戻し方がコメントに残っている", "join(',') に戻す" in h)
+
     # マクロの with context が効いているか（他ページでも同様）
     for path in ("/user/alpha", "/bookmarks"):
         r = cl.get(path, headers={"Host": "localhost:8079"})

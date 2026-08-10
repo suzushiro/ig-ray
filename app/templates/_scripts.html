@@ -40,6 +40,9 @@
     <div class="dlg tmb-dlg" role="dialog" aria-modal="true" aria-labelledby="tmb-dlg-title"
          onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">
         <h3 id="tmb-dlg-title">t Tumblr に共有</h3>
+        <div class="dlg-note" id="tmb-multi-note" style="display:none">
+            Tumblr の仕様変更により添付できるのは1枚だけです。使う画像をタップで選んでください。
+        </div>
         <div class="tmb-preview" id="tmb-preview"></div>
         <label class="tmb-label" for="tmb-caption">キャプション</label>
         <textarea id="tmb-caption" rows="3" placeholder="（任意）"></textarea>
@@ -468,6 +471,7 @@ window.addEventListener('resize', adjustStickyTops);
 // Instagram CDN の直リンク（Referer制限あり）では失敗する。
 // prepare が返す一時公開URL（トークン付き）だけを渡すこと。
 let tmbShortcode = null;
+let tmbSelected = 0;      // 添付する画像の番号（モーダルで選択、既定は1枚目）
 
 function openTumblrShare(shortcode) {
     // 共有機能が無効なときはモーダル自体が描画されていない。
@@ -481,18 +485,36 @@ function openTumblrShare(shortcode) {
     document.getElementById('tmb-src').textContent =
         'https://www.instagram.com/p/' + shortcode + '/ が出典として付きます';
 
-    // カード上の画像をそのままプレビューに使う（追加リクエストなし）
+    // カード上の画像をそのままプレビューに使う（追加リクエストなし）。
+    //
+    // **プレビューは「どの1枚を添付するか」の選択UIを兼ねる。**
+    // Tumblr のシェアツールは複数枚の自動添付を廃止した
+    // （旧: 選択画面を挟んで添付 → 現: フェッチ自体をせず空の投稿画面。
+    //   1枚なら今も自動添付される。2026-08 に tcpdump で実測確認）。
+    // Tumblr が廃止した選択ステップを、このモーダルが代わりに引き受ける。
+    tmbSelected = 0;
     const prev = document.getElementById('tmb-preview');
     prev.innerHTML = '';
     const card = document.querySelector(`.tweet .tmb-btn[data-sc="${shortcode}"]`);
     const tweet = card ? card.closest('.tweet') : null;
+    let count = 0;
     if (tweet) {
-        tweet.querySelectorAll('.tweet-media img').forEach(img => {
+        tweet.querySelectorAll('.tweet-media img').forEach((img, i) => {
             const t = document.createElement('img');
             t.src = img.src;
+            t.className = i === 0 ? 'selected' : '';
+            t.title = (i + 1) + '枚目を添付';
+            t.onclick = () => {
+                tmbSelected = i;
+                prev.querySelectorAll('img').forEach((el, j) =>
+                    el.classList.toggle('selected', j === i));
+            };
             prev.appendChild(t);
+            count++;
         });
     }
+    document.getElementById('tmb-multi-note').style.display =
+        count > 1 ? '' : 'none';
 
     const ok = document.getElementById('tmb-ok');
     ok.disabled = false; ok.textContent = 'Tumblr を開く';
@@ -541,7 +563,20 @@ async function tmbConfirm() {
 
     const params = new URLSearchParams();
     params.set('posttype', 'photo');
-    params.set('content', (data.image_urls || []).join(','));   // カンマ区切り
+
+    // **選んだ1枚だけを渡す。**
+    // 仕様上は `content` にカンマ区切りで複数枚渡せることになっているが、
+    // 現在の Tumblr は複数枚だとフェッチ自体をせず空の投稿画面になる。
+    // prepare は全枚数ぶんのURLを返し続けているので、
+    // Tumblr が選択画面を復活させたらここを join(',') に戻すだけでよい。
+    const urls = data.image_urls || [];
+    const pick = urls[Math.min(tmbSelected, urls.length - 1)] || urls[0];
+    if (!pick) {
+        msg.textContent = '失敗: 画像URLが取得できませんでした';
+        ok.disabled = false; ok.textContent = 'Tumblr を開く';
+        return;
+    }
+    params.set('content', pick);
 
     const srcUrl = data.source_url;
     if (srcUrl) params.set('canonicalUrl', srcUrl);             // これが出典になる

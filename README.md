@@ -61,13 +61,13 @@ python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 43項目
-python3 dev/share_check.py       # 65項目
+python3 dev/share_check.py       # 70項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
 npm i -D jsdom && node dev/lightbox_check.js   # 79項目
 ```
 
-計 777 項目通過。前者が extract_media / post_to_record / save_posts /
+計 782 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -731,6 +731,25 @@ ingress の設定だけに頼らない。
 
 - リモートURLしかない投稿 … Tumblr から取得できない
 - 動画のみの投稿 … サムネしか持っていない
+
+### Tumblr 側の仕様変更（2026-08）: 複数枚の自動添付は死んでいる
+
+`content` にカンマ区切りで複数枚渡すのが公式ドキュメント上の仕様だが、
+**現在の Tumblr は複数枚だとフェッチ自体をせず、空の投稿画面になる。**
+1枚なら今も自動添付される（tcpdump で `GET /share-img/...` を実測確認）。
+
+旧挙動では複数枚のとき「画像選択画面」を挟んでから投稿編集に進めた。
+現在はこの選択ステップが廃止（または故障）されている。
+配信側・Cloudflare・URLパラメータはすべて検証して無罪
+（生カンマは Tumblr の404になるので `%2C` エンコードが正しい）。
+
+**対応: 確認モーダルが選択画面を引き受ける。**
+プレビューの画像をタップして添付する1枚を選び（既定は1枚目）、
+`content` にはその1枚だけを渡す。複数枚の投稿には注記が出る。
+
+`prepare` は今も全枚数ぶんの `image_urls` を返している。
+Tumblr が選択画面を復活させたら、`_scripts.html` の
+`params.set('content', pick)` を `join(',')` に戻すだけで全枚数渡しに戻せる。
 
 ### 移植時に踏んだ罠
 

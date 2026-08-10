@@ -436,6 +436,12 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 }
 .tmb-preview img {
     height: 84px; border-radius: 6px; object-fit: cover; flex: none;
+    cursor: pointer; border: 2px solid transparent; opacity: .55;
+    transition: opacity .1s, border-color .1s;
+}
+.tmb-preview img:hover { opacity: .85; }
+.tmb-preview img.selected {
+    opacity: 1; border-color: var(--accent, #1d9bf0);
 }
 
 .ir-toast {
