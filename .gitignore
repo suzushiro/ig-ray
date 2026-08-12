@@ -4,6 +4,10 @@ data/
 __pycache__/
 *.zip
 
+# Tumblr のアクセストークン（実質パスワード。バックアップにも含めないこと）
+tumblr_accounts.json
+data/tumblr_accounts.json
+
 # 作業メモ（環境固有の情報・IP・ホスト名・アカウント名）
 # 雛形は NOTES.example.md
 NOTES.md

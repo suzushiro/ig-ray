@@ -57,6 +57,9 @@ def build_env(tmp, base=BASE, host=HOST, ttl="60"):
     importlib.reload(db)
     import cache_utils
     importlib.reload(cache_utils)
+    # web より先に読み直す（web が import 時のモジュール定数を見るため）
+    import tumblr_client
+    importlib.reload(tumblr_client)
     import web
     importlib.reload(web)
     web.app.testing = True
@@ -247,12 +250,15 @@ def test_buttons_rendered(cl):
     # 対応: モーダルで1枚選択 → content には選んだ1枚だけ渡す。
     check("1枚選択の変数がある", "tmbSelected" in h)
     check("複数枚の注記要素がある", 'id="tmb-multi-note"' in h)
-    check("content に選んだ1枚だけ渡している",
-          "params.set('content', pick)" in h)
-    check("全枚数を join で渡す旧実装に戻っていない",
-          "image_urls || []).join(',')" not in h.replace(
-              "join(',') に戻すだけ", ""))
-    check("復活時の戻し方がコメントに残っている", "join(',') に戻す" in h)
+    check("既定は選んだ1枚だけ渡す",
+          "params.set('content', urls[Math.min(tmbSelected" in h)
+    check("シェアツール方式の分岐が残っている", "tmbOpenShareTool" in h)
+
+    # 判定用トグル：Tumblr が直ったかを手でURLを組まずに確かめられるようにする
+    check("全枚数トグルがある", 'id="tmb-all"' in h)
+    check("トグルは既定でオフ", "let tmbSendAll = false;" in h)
+    check("トグルONなら全枚数を渡す", "params.set('content', urls.join(','))" in h)
+    check("トグルの表示制御がある", 'id="tmb-all-wrap"' in h)
 
     # マクロの with context が効いているか（他ページでも同様）
     for path in ("/user/alpha", "/bookmarks"):
@@ -314,11 +320,123 @@ def test_ttl(tmp):
     conn.close()
 
 
+def test_tumblr_api_endpoints(tmp, cache_dir):
+    print("\n[11] Tumblr API 方式のエンドポイント")
+    import importlib, threading, json as _json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    hits = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            hits.append({"path": self.path, "body": self.rfile.read(n)})
+            raw = _json.dumps({"response": {"id_string": "999"}}).encode()
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    accounts = os.path.join(tmp, "tumblr_accounts.json")
+    with open(accounts, "w", encoding="utf-8") as f:
+        _json.dump({"accounts": [
+            {"label": "main", "blog": "myblog", "token": "t", "secret": "s"}]}, f)
+    os.environ["TUMBLR_CONSUMER_KEY"] = "ck"
+    os.environ["TUMBLR_CONSUMER_SECRET"] = "cs"
+    os.environ["TUMBLR_ACCOUNTS_FILE"] = accounts
+
+    _db, _web, _c = build_env(tmp)      # 環境変数を立て直して web を読み直す
+    cl = _web.app.test_client()
+    import tumblr_client
+    tumblr_client.API_BASE = f"http://127.0.0.1:{srv.server_port}/v2"
+
+    r = cl.get("/api/tumblr/accounts")
+    check("アカウント一覧が200", r.status_code == 200, str(r.status_code))
+    d = r.get_json()
+    check("enabled=True", d.get("enabled") is True, str(d))
+    check("トークンを返さない", "token" not in _json.dumps(d), _json.dumps(d))
+
+    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "account": "main"})
+    check("投稿が200", r.status_code == 200, str(r.status_code) + " " + str(r.get_json()))
+    d = r.get_json()
+    check("ok=True", d.get("ok") is True, str(d))
+    check("枚数を返す", d.get("count") == 2, str(d.get("count")))
+    check("post_url を返す", "999" in (d.get("post_url") or ""), str(d))
+
+    body = hits[-1]["body"]
+    check("2枚とも送っている",
+          b'name="data[0]"' in body and b'name="data[1]"' in body)
+    check("出典が付く", b"instagram.com/p/LOCAL1/" in body)
+
+    # 部分指定
+    r = cl.post("/api/tumblr/post",
+                json={"shortcode": "LOCAL1", "indices": "1"})
+    check("indices で絞れる", r.get_json().get("count") == 1,
+          str(r.get_json()))
+    body = hits[-1]["body"]
+    check("絞ると1枚だけ送る",
+          b'name="data[0]"' in body and b'name="data[1]"' not in body)
+
+    # 異常系
+    r = cl.post("/api/tumblr/post", json={"shortcode": "REMOTE"})
+    check("ローカル画像なしは400", r.status_code == 400, str(r.status_code))
+    r = cl.post("/api/tumblr/post", json={})
+    check("shortcode なしは400", r.status_code == 400, str(r.status_code))
+    r = cl.post("/api/tumblr/post",
+                json={"shortcode": "LOCAL1", "state": "bogus"})
+    check("不正な state は400", r.status_code == 400, str(r.status_code))
+    r = cl.post("/api/tumblr/post",
+                json={"shortcode": "LOCAL1", "account": "nosuch"})
+    check("存在しないアカウントは400", r.status_code == 400, str(r.status_code))
+
+    # 公開ホスト経由では投稿できない
+    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1"},
+                headers={"Host": HOST})
+    check("公開ホスト経由の投稿は404", r.status_code == 404, str(r.status_code))
+
+    # UI
+    h = cl.get("/", headers={"Host": "localhost:8079"}).get_data(as_text=True)
+    check("投稿先セレクタがある", 'id="tmb-account"' in h)
+    check("下書きトグルがある", 'id="tmb-draft"' in h)
+    check("API方式の分岐がある", "tmbApiMode" in h)
+    check("t ボタンが出る", 'onclick="openTumblrShare' in h)
+
+    srv.shutdown()
+    for k in ("TUMBLR_CONSUMER_KEY", "TUMBLR_CONSUMER_SECRET",
+              "TUMBLR_ACCOUNTS_FILE"):
+        os.environ.pop(k, None)
+
+
+def test_tumblr_disabled_falls_back(tmp, cache_dir):
+    print("\n[12] API未設定ならシェアツール方式にフォールバック")
+    for k in ("TUMBLR_CONSUMER_KEY", "TUMBLR_CONSUMER_SECRET"):
+        os.environ[k] = ""
+    _db, _web, _c = build_env(tmp)
+    cl = _web.app.test_client()
+    d = cl.get("/api/tumblr/accounts").get_json()
+    check("enabled=False", d.get("enabled") is False, str(d))
+    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1"})
+    check("投稿は400で断る", r.status_code == 400, str(r.status_code))
+    h = cl.get("/", headers={"Host": "localhost:8079"}).get_data(as_text=True)
+    check("t ボタンは出る（シェアツール方式）", 'onclick="openTumblrShare' in h)
+    check("prepare は生きている",
+          cl.post("/api/share/prepare",
+                  json={"shortcode": "LOCAL1"}).status_code == 200)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="igray_share_")
     print(f"test dir: {tmp}")
 
     db, web, cache = build_env(tmp)
+    cache_dir_ = cache
     seed(db, cache)
     cl = web.app.test_client()
 
@@ -330,6 +448,8 @@ def main():
     test_public_host_guard(cl, token)
     test_buttons_rendered(cl)
     test_macro_with_context()
+    test_tumblr_api_endpoints(tmp, cache_dir_)
+    test_tumblr_disabled_falls_back(tmp, cache_dir_)
 
     # 環境を作り直す系は別ディレクトリで
     tmp2 = tempfile.mkdtemp(prefix="igray_share_off_")

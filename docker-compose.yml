@@ -232,7 +232,11 @@ services:
       IG_RAY_DB: ${IG_RAY_DB:-}
       IG_RAY_CACHE: /data/cache
       IG_RAY_CACHE_RETENTION_DAYS: "${IG_RAY_CACHE_RETENTION_DAYS:-30}"
-      # Tumblr 共有。未設定なら機能まるごと無効（ボタンも出ない）
+      # Tumblr 投稿（OAuth API 方式）。未設定なら下のシェアツール方式にフォールバック
+      TUMBLR_CONSUMER_KEY: "${TUMBLR_CONSUMER_KEY:-}"
+      TUMBLR_CONSUMER_SECRET: "${TUMBLR_CONSUMER_SECRET:-}"
+      TUMBLR_ACCOUNTS_FILE: "${TUMBLR_ACCOUNTS_FILE:-/data/tumblr_accounts.json}"
+      # Tumblr 共有（シェアツール方式）。未設定なら機能まるごと無効（ボタンも出ない）
       IG_RAY_PUBLIC_SHARE_BASE_URL: "${IG_RAY_PUBLIC_SHARE_BASE_URL:-}"
       IG_RAY_PUBLIC_SHARE_HOST: "${IG_RAY_PUBLIC_SHARE_HOST:-}"
       IG_RAY_SHARE_TOKEN_TTL_MIN: "${IG_RAY_SHARE_TOKEN_TTL_MIN:-60}"

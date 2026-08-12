@@ -27,6 +27,7 @@ from flask import (Flask, abort, g, jsonify, redirect, render_template, request,
 import cache_utils
 import config
 import db
+import tumblr_client
 
 JST = timezone(timedelta(hours=9))
 
@@ -291,13 +292,28 @@ def _restrict_public_host():
         return None
     if any(request.path.startswith(p) for p in SHARE_PUBLIC_PREFIXES):
         return None
+    # /api/tumblr/* もここで404になる（公開ホストから投稿されては困る）
     abort(404)
 
 
 @app.context_processor
 def _inject_share_flags():
-    """テンプレート全体から共有機能の有効/無効を見えるようにする。"""
-    return {"share_enabled": SHARE_ENABLED}
+    """
+    テンプレート全体から共有機能の有効/無効を見えるようにする。
+
+    2方式ある:
+      tumblr_enabled … OAuth API で直接投稿する（複数枚OK・外部公開不要）
+      share_enabled  … シェアツール＋一時公開URL（複数枚が壊れている旧方式）
+    どちらかが有効なら `t` ボタンを出す。両方有効なら API を優先する。
+
+    **マクロは `with context` で import しないとこれが見えない。**
+    """
+    tumblr_ok = tumblr_client.is_configured()
+    return {
+        "share_enabled": SHARE_ENABLED or tumblr_ok,
+        "tumblr_api_enabled": tumblr_ok,
+        "share_link_enabled": SHARE_ENABLED,
+    }
 
 
 def _share_source_url(shortcode):
@@ -378,6 +394,78 @@ def api_share_prepare():
         "source_url": source_url,
         "expires_in_min": int(SHARE_TOKEN_TTL_MIN),
     })
+
+
+@app.route("/api/tumblr/accounts")
+def api_tumblr_accounts():
+    """投稿先の一覧。**トークンは絶対に返さない**（public_accounts を使う）。"""
+    return jsonify({
+        "ok": True,
+        "enabled": tumblr_client.is_configured(),
+        "accounts": tumblr_client.public_accounts(),
+    })
+
+
+@app.route("/api/tumblr/post", methods=["POST"])
+def api_tumblr_post():
+    """
+    Tumblr へ直接投稿する。
+
+    **画像はローカルファイルをそのままアップロードする**ので、
+    公開URLもトンネルも要らない。複数枚も `data[0]`, `data[1]`, … で普通に通る
+    （シェアツール方式が複数枚で壊れたのはTumblr側の劣化）。
+    """
+    if not tumblr_client.is_configured():
+        return jsonify({"ok": False,
+                        "error": "Tumblr投稿が未設定です（キーまたはアカウント）"}), 400
+
+    data = request.get_json(silent=True) or request.form
+    shortcode = (data.get("shortcode") or "").strip()
+    if not shortcode:
+        return jsonify({"ok": False, "error": "shortcode が必要です"}), 400
+
+    account = tumblr_client.find_account((data.get("account") or "").strip())
+    if not account:
+        return jsonify({"ok": False, "error": "投稿先アカウントが見つかりません"}), 400
+
+    state = (data.get("state") or "published").strip()
+    if state not in tumblr_client.VALID_STATES:
+        return jsonify({"ok": False, "error": f"state が不正です: {state}"}), 400
+
+    # 添付する画像の添字（未指定なら全部）
+    raw_idx = (data.get("indices") or "").strip()
+    indices = None
+    if raw_idx:
+        try:
+            indices = {int(x) for x in raw_idx.split(",") if x.strip() != ""}
+        except ValueError:
+            return jsonify({"ok": False, "error": "indices が不正です"}), 400
+
+    c = conn()
+    # **パスをそのまま使う。** ig-ray の local_path は
+    # /data/cache/AB/XXX_0.jpg のようにサブディレクトリを含むので、
+    # ファイル名だけ取り出すと開けなくなる。
+    paths = _local_media_paths(c, shortcode)
+    if indices is not None:
+        paths = [p for i, p in enumerate(paths) if i in indices]
+    if not paths:
+        return jsonify({"ok": False,
+                        "error": "投稿できるローカル画像がありません"}), 400
+
+    source_url = _share_source_url(shortcode)
+    caption = (data.get("caption") or "").strip()
+    if caption and source_url:
+        caption = f'<a href="{source_url}">{caption}</a>'
+    tags = [t.strip() for t in (data.get("tags") or "").split(",") if t.strip()]
+
+    res = tumblr_client.create_photo_post(
+        account, paths, caption=caption, tags=tags, state=state,
+        source_url=source_url)
+    if not res.get("ok"):
+        return jsonify(res), 502
+    res["label"] = account["label"]
+    res["count"] = len(paths)
+    return jsonify(res)
 
 
 @app.route("/share/<token>")

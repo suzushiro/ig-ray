@@ -32,13 +32,16 @@ dev/route_check.py        表示層の疎通テスト（コンテナ非同梱）
 dev/migration_check.py    既存DBからのマイグレーション検証（コンテナ非同梱）
 dev/egress_check.py       設定まわり・出口IP判定のテスト（コンテナ非同梱）
 app/backfill.py           全件バックフィル（キュー管理＋常駐ワーカー）
+app/tumblr_client.py      Tumblr API v2 クライアント（OAuth1）
+tools/tumblr_auth.py      Tumblrのアクセストークン取得（初回だけ・コンテナ非同梱）
 dev/purge_check.py        アカウント完全削除のテスト（コンテナ非同梱）
 dev/backfill_check.py     全件バックフィルのテスト（コンテナ非同梱）
 dev/backup_page_check.py  バックアップ状況画面のテスト（コンテナ非同梱）
 dev/video_check.py        GraphVideo 取り扱いのテスト（コンテナ非同梱）
 dev/rename_db.py          DBファイル名の移行ヘルパ（コンテナ非同梱）
 dev/privacy_check.py      公開ファイルへの環境固有情報の混入検査（コンテナ非同梱）
-dev/share_check.py        Tumblr共有のテスト（コンテナ非同梱）
+dev/share_check.py        Tumblr投稿のテスト（コンテナ非同梱）
+dev/tumblr_check.py       Tumblr APIクライアントのテスト（コンテナ非同梱）
 deploy/                   外部公開の設定例（Cloudflare Tunnel）
 NOTES.example.md          作業メモの雛形（実物 NOTES.md は .gitignore 済み）
 dev/lightbox_check.js     ライトボックスのキー操作テスト（jsdom・コンテナ非同梱）
@@ -61,13 +64,14 @@ python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 43項目
-python3 dev/share_check.py       # 70項目
+python3 dev/share_check.py       # 97項目
+python3 dev/tumblr_check.py      # 58項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
 npm i -D jsdom && node dev/lightbox_check.js   # 79項目
 ```
 
-計 782 項目通過。前者が extract_media / post_to_record / save_posts /
+計 867 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -660,102 +664,126 @@ instaloader の `NodeIterator` は `freeze()` / `thaw()` でページ送りの�
 初回から判定を効かせると先頭で止まってしまう。
 `completed_runs > 0` のときだけ有効にしている。
 
-## Tumblr 共有（任意）
+## Tumblr 投稿（任意）
 
-投稿カードの `t` ボタン → 確認画面（キャプション・タグを編集）→
-Tumblr の投稿画面が**画像を読み込んだ状態で**開く。そこで最終確認して投稿する。
+投稿カードの `t` ボタンから Tumblr に投稿する。**2方式ある。**
 
-OAuth も API キーも不要。投稿は必ず人の目を二段通る
-（自前の確認画面 ＋ Tumblr の投稿画面）。
+| | OAuth API 方式（推奨） | シェアツール方式（旧） |
+|---|---|---|
+| 外部公開 | **不要** | 必要（Tumblrが画像を取りに来る） |
+| 複数枚 | **可** | **不可**（2026-08にTumblr側が劣化） |
+| 投稿先の選択 | 可 | 不可 |
+| 下書き | 可 | 不可 |
+| 操作 | ボタン1発で完了 | Tumblrの投稿画面が開く |
+| 要るもの | アプリ登録のみ | ドメイン・cloudflared・常駐 |
 
-### 仕組み
+**`TUMBLR_CONSUMER_KEY` が設定されていれば API 方式を使う。**
+未設定ならシェアツール方式にフォールバックする（`_inject_share_flags()`）。
 
-Tumblr の[シェアツール](https://help.tumblr.com/knowledge-base/share-button-documentation/)
-に URL パラメータを渡してポップアップを開く。
+### OAuth API 方式のセットアップ
 
+**OAuth1 を使う（OAuth2 ではない）。** OAuth2 のアクセストークンは
+`expires_in` が約42分でリフレッシュ処理が必須になるが、
+OAuth1 のトークンは失効しないので一度認可すれば放置できる。
+
+1. https://www.tumblr.com/oauth/apps でアプリを登録する。
+   **コールバックURLは `http://localhost:8765/callback`**（OAuth2リダイレクトURLも同じ値でよい）
+2. Consumer Key / Secret を `.env` に入れる
+3. アカウントごとにトークンを取得する
+
+```bash
+cd tools
+python3 -m venv .venv
+.venv/bin/pip install requests requests-oauthlib
+
+export TUMBLR_CONSUMER_KEY=xxxx
+export TUMBLR_CONSUMER_SECRET=yyyy
+
+.venv/bin/python tumblr_auth.py --label main --out ../data/tumblr_accounts.json
+.venv/bin/python tumblr_auth.py --label sub  --out ../data/tumblr_accounts.json
+.venv/bin/python tumblr_auth.py --list --out ../data/tumblr_accounts.json
 ```
-https://www.tumblr.com/widgets/share/tool
-  ?posttype=photo
-  &content=<画像URL1>,<画像URL2>   ← カンマ区切り。配列形式 content[0]= は通らない
-  &canonicalUrl=<元投稿のURL>      ← これが出典になる
-  &caption=<HTML可>
-  &tags=<カンマ区切り>
+
+**別アカウントを登録するときはシークレットウィンドウを使うか一度ログアウトすること。**
+同じアカウントのままだと同じトークンが取れてしまう。
+
+最近の Ubuntu は PEP 668 で `pip install` を直接拒否するので venv を使う。
+
+#### GUIのないサーバーで実行する場合
+
+認可にはブラウザが要る。手元のPCから**SSHポートフォワード**を張ってから実行する。
+
+```bash
+# 手元のPC側。ホスト名は解決できないことが多いのでIP直指定
+ssh -L 8765:localhost:8765 user@<サーバーのIP>
 ```
 
-**決定的な制約: `content` の画像URLは Tumblr のサーバー側から取得される。**
-LAN内のURLや Instagram CDN の直リンク（Referer 制限あり）では失敗する。
-そこで ig-ray 側にトークン付きの一時公開URLを作り、**そこだけ**を外部公開する。
+その接続の中で `tumblr_auth.py` を実行し、表示された認可URLを
+**手元のブラウザ**にコピペする。認可後 `localhost:8765` がSSH経由で転送される。
 
-```
-ブラウザ（LAN内）        Tumblr のサーバー
-     |                        |
-     | ①確認画面でトークン発行 |
-     | ②シェアツールを開く ---->|
-     |                        | ③ content の画像URLを取得
-     |                        |     ↓ Cloudflare Tunnel
-     |                        |   ig-ray web（/share 系のみ公開）
-```
+認可後に `channel N: open failed: Connection refused` が大量に出ることがあるが、
+**スクリプトが待ち受けを閉じた後のノイズ**で無害。
 
 ### 設定
 
 ```bash
-IG_RAY_PUBLIC_SHARE_BASE_URL=https://<公開ホスト>   # 未設定なら機能まるごと無効
-IG_RAY_PUBLIC_SHARE_HOST=<公開ホスト>               # 省略時は BASE_URL から自動抽出
-IG_RAY_SHARE_TOKEN_TTL_MIN=60
+TUMBLR_CONSUMER_KEY=xxxx
+TUMBLR_CONSUMER_SECRET=yyyy
+TUMBLR_ACCOUNTS_FILE=/data/tumblr_accounts.json
 ```
 
-外部公開の設定例は `deploy/cloudflared-config.example.yml`。
-**実ドメインは `.env` と `/etc/cloudflared/config.yml` にだけ書く**（`NOTES.md` に控える）。
+compose の **web サービスにだけ**渡す（worker には不要）。
+
+**`data/tumblr_accounts.json` は実質パスワード。** `.gitignore` 済み。
+`os.replace` で原子的に書き `chmod 600` する。バックアップにも含めないこと。
+
+`USER_AGENT` は `ig-ray-archiver/1.0` の固定値。
+Tumblr が一貫した値を求めているので変動させない。
 
 ### エンドポイント
 
 | | |
 |---|---|
-| `POST /api/share/prepare` | トークン発行。`share_url` / `image_urls[]` / `source_url` を返す |
-| `GET /share/<token>` | OGP付きプレビュー（投稿には必須ではない） |
-| `GET /share-img/<token>/<n>` | **Tumblr から叩かれる本命。**画像を配信 |
+| `GET /api/tumblr/accounts` | 投稿先の一覧。**トークンは返さない** |
+| `POST /api/tumblr/post` | `shortcode` / `account` / `caption` / `tags` / `state` / `indices` |
 
-`payload` は**発行時のスナップショット**。配信時にDBを引き直さないので、
-共有中に元データが変わっても公開されるのは確定した内容だけになる。
+`indices` は添付する画像の添字をカンマ区切りで指定（省略時は全部）。
+`state` は `published` / `draft` / `private` / `queue`。
 
-### 公開ホストのガード（最後の砦）
+**`create_photo_post` に渡すのは実ファイルの絶対パス。**
+ig-ray の `local_path` は `/data/cache/AB/XXX_0.jpg` のようにサブディレクトリを
+含むので、ファイル名だけ取り出すと開けなくなる。
 
-`before_request` で、公開ホスト名宛のリクエストは `/share` と `/share-img`
-以外すべて 404 にする。**リバースプロキシの path 指定を間違えても本体は守られる。**
-スクレイパーの操作画面やバックアップ画面が外に出ると洒落にならないので、
-ingress の設定だけに頼らない。
+### 制限
 
-### 共有できない投稿
+- レート制限は **1日250投稿・250画像アップロード**。手動運用では当たらない
+- Consumer Secret を人に見せない（スクショにも写さない）。
+  再生成はできるが**再認可が必要**になる
 
-`t` ボタンは**ローカルに実体のある静止画が1枚以上ある投稿にだけ**出る。
+### シェアツール方式（旧）
 
-- リモートURLしかない投稿 … Tumblr から取得できない
-- 動画のみの投稿 … サムネしか持っていない
+`TUMBLR_CONSUMER_KEY` が未設定のときのフォールバック。
+Tumblr の[シェアツール](https://help.tumblr.com/knowledge-base/share-button-documentation/)
+に URL パラメータを渡してポップアップを開く。
 
-### Tumblr 側の仕様変更（2026-08）: 複数枚の自動添付は死んでいる
+**`content` の画像URLは Tumblr のサーバー側から取得される**ため、
+トークン付きの一時公開URLを自前で配信する必要がある
+（`PUBLIC_SHARE_BASE_URL` / cloudflared / `/share` 系エンドポイント）。
+詳細は `deploy/README.md`。
 
-`content` にカンマ区切りで複数枚渡すのが公式ドキュメント上の仕様だが、
-**現在の Tumblr は複数枚だとフェッチ自体をせず、空の投稿画面になる。**
-1枚なら今も自動添付される（tcpdump で `GET /share-img/...` を実測確認）。
+**2026-08 時点、複数枚の自動添付が効かない。**
+`content` にカンマ区切りで複数枚渡すのが仕様だが、現在の Tumblr は
+複数枚だとフェッチ自体をせず空の投稿画面になる（1枚なら今も自動添付される。
+tcpdump で実測確認）。配信側・Cloudflare・URLパラメータはすべて検証して無罪。
 
-旧挙動では複数枚のとき「画像選択画面」を挟んでから投稿編集に進めた。
-現在はこの選択ステップが廃止（または故障）されている。
-配信側・Cloudflare・URLパラメータはすべて検証して無罪
-（生カンマは Tumblr の404になるので `%2C` エンコードが正しい）。
+そのためモーダルで1枚を選ばせている。「全枚数を渡す（実験）」トグルで
+本来の渡し方も試せるので、Tumblr が直ったかを手でURLを組まずに確認できる。
 
-**対応: 確認モーダルが選択画面を引き受ける。**
-プレビューの画像をタップして添付する1枚を選び（既定は1枚目）、
-`content` にはその1枚だけを渡す。複数枚の投稿には注記が出る。
-
-`prepare` は今も全枚数ぶんの `image_urls` を返している。
-Tumblr が選択画面を復活させたら、`_scripts.html` の
-`params.set('content', pick)` を `join(',')` に戻すだけで全枚数渡しに戻せる。
+**API方式に移行すればこの制約は消える。** cloudflared・トンネル・
+`/share` 系エンドポイント・`share_tokens` テーブルも不要になるので、
+API方式が実際に通るのを確認したら旧方式は消してよい。
 
 ### 移植時に踏んだ罠
-
-**X-Ray では一度この機能を作って削除している。** 敗因は
-`content[0]=..` の配列形式と、CDN 直リンクを渡していたこと。後者が本質で、
-自前で配信できる画像URLを用意するまでこの機能は成立しない。
 
 **Jinja のマクロは呼び出し元のコンテキストを引き継がない。**
 
@@ -774,7 +802,8 @@ Tumblr が選択画面を復活させたら、`_scripts.html` の
 html.count('onclick="openTumblrShare')   # 共有可能な投稿の数だけあるはず
 ```
 
-`dev/share_check.py` はこれを固定してあり、`with context` を外すと落ちる。
+**`<script>` 内に Jinja タグを書くと `dev/lightbox_check.js` が落ちる**
+（eval が `Unexpected token '%'`）。JSは常に定義し、出し分けはHTML側だけにする。
 
 ## 既知の未確認事項
 
