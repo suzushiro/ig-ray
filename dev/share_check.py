@@ -245,6 +245,13 @@ def test_buttons_rendered(cl):
     check("VIDONLY のボタンは出ない", "openTumblrShare('VIDONLY')" not in h)
     check("共有モーダルが描画されている", 'id="tmb-dlg"' in h)
 
+    # キャプションの初期値に投稿者名を入れる（編集可能）
+    check("カードに data-owner がある", 'data-owner="alpha"' in h)
+    check("キャプションの初期値に投稿者名を使う",
+          "tweet.dataset.owner" in h)
+    check("初期値は空文字にフォールバック",
+          "tweet.dataset.owner) ? tweet.dataset.owner : ''" in h)
+
     # --- Tumblr の仕様変更対応（2026-08）---
     # 複数枚の自動添付が廃止された（1枚なら今もフェッチされる。tcpdumpで実測）。
     # 対応: モーダルで1枚選択 → content には選んだ1枚だけ渡す。

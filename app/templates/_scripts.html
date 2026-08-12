@@ -549,7 +549,14 @@ async function openTumblrShare(shortcode) {
     tmbShortcode = shortcode;
     tmbSelected = 0;
     tmbChosen = new Set();
-    document.getElementById('tmb-caption').value = '';
+    const btn = document.querySelector(`.tweet .tmb-btn[data-sc="${shortcode}"]`);
+    const tweet = btn ? btn.closest('.tweet') : null;
+
+    // キャプションの初期値は投稿者名。編集も削除もできる。
+    // カード側の .tweet[data-owner] を使う（共同投稿では相手側の名前になるが、
+    // 「その投稿の持ち主」としてはそれが正しい）。
+    document.getElementById('tmb-caption').value =
+        (tweet && tweet.dataset.owner) ? tweet.dataset.owner : '';
     document.getElementById('tmb-tags').value = '';
     document.getElementById('tmb-msg').textContent = '';
     document.getElementById('tmb-src').textContent =
@@ -561,8 +568,6 @@ async function openTumblrShare(shortcode) {
     // カード上の画像をそのままプレビューに使う（追加リクエストなし）
     const prev = document.getElementById('tmb-preview');
     prev.innerHTML = '';
-    const card = document.querySelector(`.tweet .tmb-btn[data-sc="${shortcode}"]`);
-    const tweet = card ? card.closest('.tweet') : null;
     tmbCount = 0;
     if (tweet) {
         tweet.querySelectorAll('.tweet-media img').forEach((img, i) => {

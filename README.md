@@ -64,14 +64,14 @@ python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 43項目
-python3 dev/share_check.py       # 97項目
+python3 dev/share_check.py       # 100項目
 python3 dev/tumblr_check.py      # 58項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
-npm i -D jsdom && node dev/lightbox_check.js   # 79項目
+npm i -D jsdom && node dev/lightbox_check.js   # 82項目
 ```
 
-計 867 項目通過。前者が extract_media / post_to_record / save_posts /
+計 873 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -749,6 +749,11 @@ Tumblr が一貫した値を求めているので変動させない。
 
 `indices` は添付する画像の添字をカンマ区切りで指定（省略時は全部）。
 `state` は `published` / `draft` / `private` / `queue`。
+
+**キャプションの初期値は投稿者のアカウントIDが入る**（編集も削除も可）。
+カード側の `.tweet[data-owner]` から取る。共同投稿では相手側の名前になるが、
+その投稿の持ち主としてはそれが正しいのでそのまま使う。
+出典URLは別途 `source_url` として付くので、キャプションは表示テキストだけでよい。
 
 **`create_photo_post` に渡すのは実ファイルの絶対パス。**
 ig-ray の `local_path` は `/data/cache/AB/XXX_0.jpg` のようにサブディレクトリを

@@ -507,7 +507,61 @@ console.log('\n[14] フィードは従来通り（回帰）');
 }
 
 console.log('\n' + '='.repeat(50));
-console.log(`PASS ${PASS.length} / FAIL ${FAIL.length}`);
-if (FAIL.length) { FAIL.forEach(f => console.log('  - ' + f)); process.exit(1); }
-console.log('すべて通過');
+
+// --- Tumblr モーダル：キャプションの初期値 ---------------------------
+// 「投稿者名が入る」はDOMを動かさないと確かめられない
+// （テンプレートに文字列があることと、実際に値が入ることは別）。
+function buildTumblrDom() {
+    const dom = new JSDOM(`<!DOCTYPE html><html><body>
+        <div class="tweet" data-owner="testuser">
+          <div class="tweet-media"><img src="a.jpg"><img src="b.jpg"></div>
+          <button class="tmb-btn" data-sc="SC1">t</button>
+        </div>
+        <div class="dlg-wrap" id="tmb-dlg"><div class="dlg">
+          <div id="tmb-multi-note"></div>
+          <div class="tmb-preview" id="tmb-preview"></div>
+          <div id="tmb-link-note"></div>
+          <label id="tmb-all-wrap"><input type="checkbox" id="tmb-all"></label>
+          <div id="tmb-all-note"></div>
+          <div id="tmb-account-wrap"><select id="tmb-account"></select></div>
+          <textarea id="tmb-caption"></textarea><input type="text" id="tmb-tags">
+          <label id="tmb-draft-wrap"><input type="checkbox" id="tmb-draft"></label>
+          <div id="tmb-src"></div><div id="tmb-msg"></div><button id="tmb-ok"></button>
+        </div></div>
+        </body></html>`, {
+            runScripts: 'outside-only', pretendToBeVisual: true,
+            url: 'http://localhost/',
+        });
+    dom.window.Element.prototype.scrollIntoView = function () {};
+    dom.window.IntersectionObserver = class {
+        constructor(cb) { this.cb = cb; }
+        observe() {} unobserve() {} disconnect() {}
+    };
+    dom.window.localStorage.setItem('instaray-theme', 'light');
+    dom.window.eval(stripJinja(code));
+    // API未設定＝シェアツール方式として動かす
+    dom.window.fetch = async () => ({json: async () => ({enabled: false, accounts: []})});
+    return dom;
+}
+
+    // --- Tumblr モーダル（同じ async IIFE の中で await する）---
+    console.log('\n[Tumblr] モーダルのキャプション初期値');
+    const dom = buildTumblrDom();
+    await dom.window.openTumblrShare('SC1');
+    const d = dom.window.document;
+    check('キャプションに投稿者名が入る',
+          d.getElementById('tmb-caption').value === 'testuser',
+          d.getElementById('tmb-caption').value);
+    check('プレビューに枚数分の画像が並ぶ',
+          d.querySelectorAll('#tmb-preview img').length === 2);
+    check('出典の案内に shortcode が出る',
+          d.getElementById('tmb-src').textContent.includes('SC1'));
+
+    summary();
 })();
+
+function summary() {
+    console.log(`\nPASS ${PASS.length} / FAIL ${FAIL.length}`);
+    if (FAIL.length) { FAIL.forEach(f => console.log('  - ' + f)); process.exit(1); }
+    console.log('すべて通過');
+}
