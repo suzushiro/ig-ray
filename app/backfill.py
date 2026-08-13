@@ -329,7 +329,7 @@ def run_job(conn, loader, job, page_limit=None):
         message="打ち切り（保管済み）" if result == "stopped" else None)
     db.clear_next_run(conn, WHO)
     log(f"  完了: {seen} 件確認 / 新規 {saved} / メディア {media}")
-    db.log_scrape(conn, username, "backfill_done", fetched=seen, inserted=saved)
+    db.log_scrape(conn, username, db.BACKFILL_DONE, fetched=seen, inserted=saved)
     conn.commit()
     return result
 

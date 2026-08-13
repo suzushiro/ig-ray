@@ -63,7 +63,7 @@ python3 dev/egress_check.py      # 37項目
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
-python3 dev/backup_page_check.py # 43項目
+python3 dev/backup_page_check.py # 50項目
 python3 dev/share_check.py       # 100項目
 python3 dev/tumblr_check.py      # 58項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
@@ -71,7 +71,7 @@ python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ�
 npm i -D jsdom && node dev/lightbox_check.js   # 82項目
 ```
 
-計 873 項目通過。前者が extract_media / post_to_record / save_posts /
+計 880 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -628,6 +628,21 @@ instaloader の `NodeIterator` は `freeze()` / `thaw()` でページ送りの�
 そこで `meta` テーブルの `activity:scrape` を巡回側が打刻し、
 **バックフィル側が巡回中は待つ**という一方向の譲り合いにしている
 （cron は数分で終わるので待たせない）。`IG_RAY_BACKFILL_QUIET_SEC` で調整。
+
+### scrape_log のステータス
+
+**新しいステータスを `log_scrape` に足したら `db.OK_STATUSES` にも入れること。**
+トップの警告バナーは「このリストに無いもの＝失敗」で判定するので、
+入れ忘れると**成功が赤字で警告される**（v4.5 の `backfill_done` で実際にやった）。
+
+| | |
+|---|---|
+| `ok` / `ok_degraded` | 巡回の正常終了。`ok_degraded` がこの運用の通常状態 |
+| `backfill_done` | バックフィルの1周完了。**正常** |
+| `ratelimited` / `error` | 要確認 |
+
+`backfill_done` は `/backup` の巡回集計からは除外している（巡回とは別枠のため）が、
+失敗としては数えない。この2つは別の話なので混同しないこと。
 
 ### バックアップ状況画面（`/backup`）
 

@@ -205,13 +205,53 @@ def test_legacy_schema(cache_dir):
 
 
 def test_other_pages(dbfile, cache_dir):
-    print("\n[7] 既存ページの回帰")
+    print("\n[9] 既存ページの回帰")
     cl = client(dbfile, cache_dir)
     for path in ("/", "/gallery", "/bookmarks", "/mutes", "/storage"):
         check(f"{path} が 200", cl.get(path).status_code == 200)
     for path in ("/", "/gallery", "/storage"):
         h = cl.get(path).get_data(as_text=True)
         check(f"{path} のナビにバックアップが出る", 'href="/backup"' in h)
+
+
+def test_backfill_done_not_a_failure(cache_dir):
+    print("\n[8] backfill_done を失敗として数えない")
+    # トップの警告バナーは「OK_STATUSES に無いもの＝失敗」で判定する。
+    # log_scrape にステータスを足したときここへの追加を忘れると、
+    # **成功が赤字の警告として出る**（v4.5 の backfill_done で実際にやった）。
+    import db
+    tmp = tempfile.mkdtemp(prefix="igray_bp_status_")
+    dbfile = os.path.join(tmp, "t.db")
+    conn = db.connect(dbfile)
+    db.init_db(conn)
+    conn.execute("INSERT INTO accounts (username) VALUES ('nemonagi')")
+    db.log_scrape(conn, "nemonagi", db.BACKFILL_DONE, fetched=500, inserted=500)
+    db.log_scrape(conn, "alpha", "ok_degraded", 6, 1)
+    conn.commit()
+    conn.close()
+
+    check("BACKFILL_DONE が OK_STATUSES に入っている",
+          db.BACKFILL_DONE in db.OK_STATUSES, str(db.OK_STATUSES))
+    check("ok / ok_degraded も入っている",
+          "ok" in db.OK_STATUSES and "ok_degraded" in db.OK_STATUSES)
+
+    cl = client(dbfile, cache_dir)
+    h = cl.get("/").get_data(as_text=True)
+    check("トップに警告が出ない", "backfill_done" not in h)
+    check("成功が失敗として表示されない", "nemonagi" not in h or "×1" not in h)
+
+    # 本物の失敗はちゃんと出る（判定を緩めすぎていないか）
+    conn = db.connect(dbfile)
+    db.log_scrape(conn, "beta", "ratelimited", 0, 0)
+    conn.commit()
+    conn.close()
+    cl = client(dbfile, cache_dir)
+    h = cl.get("/").get_data(as_text=True)
+    check("本物の失敗は警告に出る", "ratelimited" in h)
+    check("そのアカウント名も出る", "beta" in h)
+
+    # /backup 側は巡回の集計から除外しつつ、ジョブとしては見える
+    check("/backup が 200", cl.get("/backup").status_code == 200)
 
 
 def main():
@@ -227,6 +267,7 @@ def main():
     test_no_data(cache_dir)
     test_dead_worker(cache_dir)
     test_legacy_schema(cache_dir)
+    test_backfill_done_not_a_failure(cache_dir)
     test_other_pages(dbfile, cache_dir)
 
     print(f"\n{'=' * 50}")

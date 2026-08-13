@@ -562,15 +562,19 @@ def index():
         except Exception:
             last_jst = last["ended_at"][:16].replace("T", " ") + " UTC"
 
-    # 直近のエラー/レート制限を拾う（degraded は正常扱い）
-    troubles = [dict(r) for r in c.execute("""
+    # 直近のエラー/レート制限を拾う。
+    # 正常なステータスは db.OK_STATUSES に集約してある
+    # （degraded も backfill の完了も正常。ここを直書きすると
+    #  ステータスを増やしたとき成功が警告として出る）
+    marks = ",".join("?" * len(db.OK_STATUSES))
+    troubles = [dict(r) for r in c.execute(f"""
         SELECT username, status, COUNT(*) AS n
         FROM scrape_log
-        WHERE status NOT IN ('ok', 'ok_degraded')
+        WHERE status NOT IN ({marks})
           AND ended_at > datetime('now', '-6 hours')
         GROUP BY username, status
         ORDER BY n DESC LIMIT 5
-    """)]
+    """, db.OK_STATUSES)]
 
     next_url = url_for("index", page=page + 1) if has_next else None
     if request.args.get("partial") == "1":
@@ -856,9 +860,10 @@ def backup():
 
     # --- 定期巡回 -------------------------------------------------------
     cron_next = db.get_next_run(c, "scrape")
+    # バックフィルは巡回とは別枠なので集計から外す（失敗ではない）
     last_sweep = c.execute(
-        "SELECT MAX(ended_at) AS t FROM scrape_log "
-        "WHERE status != 'backfill_done'").fetchone()["t"]
+        "SELECT MAX(ended_at) AS t FROM scrape_log WHERE status != ?",
+        (db.BACKFILL_DONE,)).fetchone()["t"]
 
     # 直近1周ぶんの内訳。ended_at の降順で accounts 件数までを見る
     n_accounts = c.execute(
@@ -866,8 +871,8 @@ def backup():
         "WHERE is_enabled = 1 AND COALESCE(is_muted, 0) = 0").fetchone()["n"]
     recent = [dict(r) for r in c.execute(
         "SELECT username, status, fetched, inserted, message, ended_at "
-        "FROM scrape_log WHERE status != 'backfill_done' "
-        "ORDER BY ended_at DESC LIMIT ?", (max(n_accounts, 1),))]
+        "FROM scrape_log WHERE status != ? "
+        "ORDER BY ended_at DESC LIMIT ?", (db.BACKFILL_DONE, max(n_accounts, 1)))]
     cron_summary = {}
     for r in recent:
         cron_summary[r["status"]] = cron_summary.get(r["status"], 0) + 1

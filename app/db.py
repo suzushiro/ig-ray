@@ -489,6 +489,18 @@ def bookmarked_shortcodes(conn):
         return set()
 
 
+# scrape_log のうち「異常ではない」ステータス。
+#
+# **新しいステータスを log_scrape に足したら必ずここにも入れること。**
+# 表示側は「このリストに無いもの＝失敗」として警告を出すので、
+# 入れ忘れると成功が赤字で警告される（v4.5 の backfill_done で実際にやった）。
+# バックフィルの1周完了。cron の巡回とは別枠なので、
+# 表示側では巡回の集計から除外しつつ、失敗としては数えない。
+BACKFILL_DONE = "backfill_done"
+
+OK_STATUSES = ("ok", "ok_degraded", BACKFILL_DONE)
+
+
 def log_scrape(conn, username, status, fetched=0, inserted=0,
                message=None, started_at=None):
     conn.execute(
