@@ -40,8 +40,9 @@ dev/backup_page_check.py  バックアップ状況画面のテスト（コンテ
 dev/video_check.py        GraphVideo 取り扱いのテスト（コンテナ非同梱）
 dev/rename_db.py          DBファイル名の移行ヘルパ（コンテナ非同梱）
 dev/privacy_check.py      公開ファイルへの環境固有情報の混入検査（コンテナ非同梱）
-dev/share_check.py        Tumblr投稿のテスト（コンテナ非同梱）
+dev/css_check.py          CSS変数の未定義・半透明の検出（コンテナ非同梱）
 dev/tumblr_check.py       Tumblr APIクライアントのテスト（コンテナ非同梱）
+dev/tumblr_web_check.py   Tumblr投稿のエンドポイント・UIのテスト（コンテナ非同梱）
 deploy/                   外部公開の設定例（Cloudflare Tunnel）
 NOTES.example.md          作業メモの雛形（実物 NOTES.md は .gitignore 済み）
 dev/lightbox_check.js     ライトボックスのキー操作テスト（jsdom・コンテナ非同梱）
@@ -58,20 +59,21 @@ python3 dev/loader_check.py      # 20項目
 python3 dev/accounts_check.py    # 35項目
 python3 dev/fallback_check.py    # 135項目
 python3 dev/route_check.py       # 113項目
+python3 dev/css_check.py         # 17項目（CSS変数の未定義検出）
 python3 dev/migration_check.py   # 21項目
 python3 dev/egress_check.py      # 37項目
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 34項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 50項目
-python3 dev/share_check.py       # 100項目
 python3 dev/tumblr_check.py      # 58項目
+python3 dev/tumblr_web_check.py  # 51項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
-npm i -D jsdom && node dev/lightbox_check.js   # 82項目
+npm i -D jsdom && node dev/lightbox_check.js   # 105項目
 ```
 
-計 880 項目通過。前者が extract_media / post_to_record / save_posts /
+計 871 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -681,19 +683,27 @@ instaloader の `NodeIterator` は `freeze()` / `thaw()` でページ送りの�
 
 ## Tumblr 投稿（任意）
 
-投稿カードの `t` ボタンから Tumblr に投稿する。**2方式ある。**
+投稿カードの `t` ボタンから Tumblr に投稿する。**OAuth API 方式のみ。**
 
-| | OAuth API 方式（推奨） | シェアツール方式（旧） |
-|---|---|---|
-| 外部公開 | **不要** | 必要（Tumblrが画像を取りに来る） |
-| 複数枚 | **可** | **不可**（2026-08にTumblr側が劣化） |
-| 投稿先の選択 | 可 | 不可 |
-| 下書き | 可 | 不可 |
-| 操作 | ボタン1発で完了 | Tumblrの投稿画面が開く |
-| 要るもの | アプリ登録のみ | ドメイン・cloudflared・常駐 |
+画像はこちらから送るので外部公開もトンネルも要らず、複数枚もそのまま投稿できる。
+`TUMBLR_CONSUMER_KEY` が未設定なら機能まるごと無効（`t` ボタンも出ない）。
 
-**`TUMBLR_CONSUMER_KEY` が設定されていれば API 方式を使う。**
-未設定ならシェアツール方式にフォールバックする（`_inject_share_flags()`）。
+> 旧「シェアツール方式」（Tumblrのポップアップに一時公開URLを渡す）は撤去した。
+> Tumblr 側が複数枚の自動添付をやめたうえ、URL配信のために cloudflared と
+> ドメインが要るので、API方式に対して利点が無くなったため。
+> `share_tokens` テーブルは SCHEMA_VERSION 7 のマイグレーションで落としている。
+
+### モーダルの操作
+
+- **既定で全部の画像が選択される。** タップで外す／戻す
+- 「全選択」「1枚目だけ」のボタンで一括切り替え。選択枚数は常時表示
+- 最後の1枚は外せない（0枚では投稿できないため）
+- **3枚以上を選ぶと自動的に下書きになる**（`TMB_DRAFT_THRESHOLD`）。
+  枚数が多いほど公開前に見直したいため。注記が出て、外すこともできる。
+  **一度手で操作したら以降は自動判定が介入しない**
+  （勝手に戻すと「外したのにまた入る」体験になる）
+- キャプションの初期値は投稿者のアカウントID（編集も削除も可）
+- 投稿先セレクタは登録が2件以上のときだけ出る
 
 ### OAuth API 方式のセットアップ
 
@@ -780,29 +790,6 @@ ig-ray の `local_path` は `/data/cache/AB/XXX_0.jpg` のようにサブディ�
 - Consumer Secret を人に見せない（スクショにも写さない）。
   再生成はできるが**再認可が必要**になる
 
-### シェアツール方式（旧）
-
-`TUMBLR_CONSUMER_KEY` が未設定のときのフォールバック。
-Tumblr の[シェアツール](https://help.tumblr.com/knowledge-base/share-button-documentation/)
-に URL パラメータを渡してポップアップを開く。
-
-**`content` の画像URLは Tumblr のサーバー側から取得される**ため、
-トークン付きの一時公開URLを自前で配信する必要がある
-（`PUBLIC_SHARE_BASE_URL` / cloudflared / `/share` 系エンドポイント）。
-詳細は `deploy/README.md`。
-
-**2026-08 時点、複数枚の自動添付が効かない。**
-`content` にカンマ区切りで複数枚渡すのが仕様だが、現在の Tumblr は
-複数枚だとフェッチ自体をせず空の投稿画面になる（1枚なら今も自動添付される。
-tcpdump で実測確認）。配信側・Cloudflare・URLパラメータはすべて検証して無罪。
-
-そのためモーダルで1枚を選ばせている。「全枚数を渡す（実験）」トグルで
-本来の渡し方も試せるので、Tumblr が直ったかを手でURLを組まずに確認できる。
-
-**API方式に移行すればこの制約は消える。** cloudflared・トンネル・
-`/share` 系エンドポイント・`share_tokens` テーブルも不要になるので、
-API方式が実際に通るのを確認したら旧方式は消してよい。
-
 ### 移植時に踏んだ罠
 
 **Jinja のマクロは呼び出し元のコンテキストを引き継がない。**
@@ -824,6 +811,32 @@ html.count('onclick="openTumblrShare')   # 共有可能な投稿の数だけあ�
 
 **`<script>` 内に Jinja タグを書くと `dev/lightbox_check.js` が落ちる**
 （eval が `Unexpected token '%'`）。JSは常に定義し、出し分けはHTML側だけにする。
+
+**HTMLだけ直してJSを追随させないと、モーダルが開かなくなる。**
+`getElementById('...').style` が `null` になって TypeError で止まり、
+`.open` クラスが付く前に関数が死ぬ（2026-09に実際に起きた）。
+`dev/tumblr_web_check.py` の [8] が、JSが触るIDとテンプレートのIDを
+**両方向で突き合わせて**検出する。
+
+## CSS変数の注意
+
+**未定義のCSS変数を使うと、その宣言ごと無効になる。**
+ブラウザは黙って無視するのでエラーも出ない。
+
+`_style.html` が `--bg` と `--surface` しか定義していないのに、
+ダイアログ・カード・ボタンの9箇所が `--bg-card` を参照していて、
+**モーダルの背景が塗られず後ろが透けていた**（2026-09に発覚）。
+`--bg-card` を両テーマに定義して解消。
+
+`dev/css_check.py` が以下を機械的に検出する。
+
+- 未定義の変数の参照（`var(--x, フォールバック)` 付きは許可）
+- ライト／ダークで片方にしか定義がない変数
+- 重ねて表示する面（`--bg-card` / `--bg` / `--surface`）が半透明になっていないか
+- `.dlg` の背景指定と `.dlg-wrap` の暗幕、モーダルの重ね順
+
+**重ねる面の色は必ず不透明にすること。** 半透明にすると後ろが透ける。
+暗幕（`.dlg-wrap`）とオーバーレイは半透明でよい。
 
 ## 既知の未確認事項
 

@@ -8,6 +8,10 @@
     --text-dim: #536471;
     --accent: #1d9bf0;
     --video-overlay: rgba(0,0,0,0.35);
+    /* カード・ダイアログ・ボタンの地の色。
+       **必ず不透明にすること。** 未定義や半透明だと background 宣言ごと
+       無効になり、モーダルの背後が透けて読めなくなる。 */
+    --bg-card: #ffffff;
 }
 [data-theme="dark"] {
     --bg: #0f1419;
@@ -18,6 +22,7 @@
     --text-dim: #8b98a5;
     --accent: #1d9bf0;
     --video-overlay: rgba(0,0,0,0.45);
+    --bg-card: #1a1f26;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* 初回ロード時はtransitionを無効にしてチカチカ防止 */
@@ -444,7 +449,18 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
     opacity: 1; border-color: var(--accent, #1d9bf0);
 }
 /* 全枚数モードでは1枚選択が無意味なので、選択の見た目を消す */
-.tmb-preview.all-mode img { opacity: 1; border-color: transparent; cursor: default; }
+/* 選択バー：枚数表示と「全選択 / 1枚目だけ」 */
+.tmb-select-bar {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0 0 6px; font-size: 11px; color: var(--text-dim);
+}
+.tmb-select-bar #tmb-count { font-variant-numeric: tabular-nums; }
+.tmb-mini {
+    padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text-dim); font-family: inherit;
+}
+.tmb-mini:hover { background: var(--surface-hover); color: var(--text); }
 .tmb-check {
     display: flex; align-items: center; gap: 6px; margin: 2px 0 6px;
     font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;

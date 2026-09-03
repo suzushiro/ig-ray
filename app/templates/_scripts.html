@@ -41,23 +41,13 @@
          onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">
         <h3 id="tmb-dlg-title">t Tumblr に投稿</h3>
 
-        {# API方式では複数枚がそのまま通る。タップは「外す/戻す」の選択。 #}
-        <div class="dlg-note" id="tmb-multi-note" style="display:none">
-            使う画像をタップで選べます（既定は全部）。
+        {# 複数枚はAPIでそのまま通る。タップは「外す/戻す」の選択。 #}
+        <div class="tmb-select-bar" id="tmb-multi-note" style="display:none">
+            <span id="tmb-count"></span>
+            <button type="button" class="tmb-mini" onclick="tmbSelectAll()">全選択</button>
+            <button type="button" class="tmb-mini" onclick="tmbSelectFirst()">1枚目だけ</button>
         </div>
         <div class="tmb-preview" id="tmb-preview"></div>
-
-        {# シェアツール方式のときだけ出る。1枚しか添付できない #}
-        <div class="dlg-note" id="tmb-link-note" style="display:none">
-            いまの Tumblr は複数枚の自動添付が効きません。使う画像を1枚選んでください。
-        </div>
-        <label class="tmb-check" id="tmb-all-wrap" style="display:none">
-            <input type="checkbox" id="tmb-all" onchange="tmbAllToggled()">
-            <span>全枚数を渡す（実験）</span>
-        </label>
-        <div class="dlg-note" id="tmb-all-note" style="display:none">
-            本来の仕様の渡し方です。Tumblr 側が直れば画像が全部入ります。
-        </div>
 
         <div id="tmb-account-wrap" style="display:none">
             <label class="tmb-label" for="tmb-account">投稿先</label>
@@ -69,10 +59,13 @@
         <label class="tmb-label" for="tmb-tags">タグ（カンマ区切り）</label>
         <input type="text" id="tmb-tags" placeholder="（任意） photography, instagram">
 
-        <label class="tmb-check" id="tmb-draft-wrap" style="display:none">
-            <input type="checkbox" id="tmb-draft" onchange="tmbDraftToggled()">
+        <label class="tmb-check" id="tmb-draft-wrap">
+            <input type="checkbox" id="tmb-draft" onchange="tmbDraftToggled(true)">
             <span>下書きとして投稿する（公開しない）</span>
         </label>
+        <div class="dlg-note" id="tmb-draft-auto" style="display:none">
+            3枚以上なので下書きにしました（外せます）。
+        </div>
 
         <div class="dlg-note" id="tmb-src"></div>
         <div class="dlg-msg" id="tmb-msg"></div>
@@ -487,25 +480,25 @@ window.addEventListener('resize', adjustStickyTops);
 
 // --- Tumblr 投稿 -------------------------------------------------------
 //
-// 2方式ある。バックエンドが対応していればAPI方式を使う。
+// **API方式（OAuth1）のみ。** /api/tumblr/post にPOSTして直接投稿する。
+// 画像はサーバ側がローカルファイルをそのままアップロードするので、
+// 外部公開URLもトンネルも要らず、複数枚もそのまま通る。
 //
-// **API方式（OAuth1）** … /api/tumblr/post にPOSTして直接投稿する。
-//   画像はサーバ側がローカルファイルをそのままアップロードするので、
-//   外部公開URLもトンネルも不要。**複数枚がそのまま通る。**
-//
-// **シェアツール方式** … Tumblr のポップアップを開き、URLパラメータで
-//   画像URLを渡す。Tumblr側が取りに来るので一時公開URLが要る。
-//   2026-08 に複数枚の自動添付が壊れたため1枚しか添付できない。
+// 旧シェアツール方式（Tumblrのポップアップに画像URLを渡す）は撤去した。
+// Tumblr 側が複数枚の自動添付をやめたうえ、一時公開URLの配信のために
+// cloudflared とドメインが必要で、API方式に対して利点が無くなったため。
 let tmbShortcode = null;
-let tmbSelected = 0;         // シェアツール方式で添付する1枚
-let tmbChosen = new Set();   // API方式で添付する画像（空なら全部）
+let tmbChosen = new Set();   // 添付する画像の添字（空なら全部）
 let tmbCount = 0;
-let tmbSendAll = false;      // シェアツール方式の実験トグル
 let tmbAccounts = null;      // /api/tumblr/accounts の結果（一度だけ取る）
+let tmbDraftManual = false;  // 下書きを手で操作したか（自動判定より優先する）
 
-function tmbApiMode() {
-    return document.getElementById('tmb-account-wrap') &&
-           tmbAccounts && tmbAccounts.enabled;
+// この枚数以上を選んだら自動で下書きにする。
+// 枚数が多い投稿ほど公開前に一度見直したいため。
+const TMB_DRAFT_THRESHOLD = 3;
+
+function tmbEnabled() {
+    return !!document.getElementById('tmb-dlg') && tmbAccounts && tmbAccounts.enabled;
 }
 
 async function tmbLoadAccounts() {
@@ -528,18 +521,79 @@ async function tmbLoadAccounts() {
     }
 }
 
-function tmbAllToggled() {
-    tmbSendAll = document.getElementById('tmb-all').checked;
-    document.getElementById('tmb-all-note').style.display = tmbSendAll ? '' : 'none';
-    document.getElementById('tmb-preview').classList.toggle('all-mode', tmbSendAll);
-    document.getElementById('tmb-link-note').style.display =
-        (!tmbSendAll && tmbCount > 1) ? '' : 'none';
+// --- 選択 -------------------------------------------------------------
+// tmbChosen が空のときは「全部」を意味する。
+// 全選択がこの状態に戻るので、絞ったときだけ indices を送れば済む。
+
+function tmbSelectedCount() {
+    return tmbChosen.size ? tmbChosen.size : tmbCount;
 }
 
-function tmbDraftToggled() {
-    const draft = document.getElementById('tmb-draft').checked;
-    document.getElementById('tmb-ok').textContent = draft ? '下書きに保存' : '投稿する';
+function tmbSelectAll() {
+    tmbChosen = new Set();
+    tmbRefreshSelection();
 }
+
+function tmbSelectFirst() {
+    tmbChosen = new Set([0]);
+    tmbRefreshSelection();
+}
+
+function tmbToggleImage(i) {
+    // 空＝全部なので、初回タップで実体化してから外す
+    if (!tmbChosen.size) {
+        for (let j = 0; j < tmbCount; j++) tmbChosen.add(j);
+    }
+    if (tmbChosen.has(i)) tmbChosen.delete(i); else tmbChosen.add(i);
+    if (!tmbChosen.size) tmbChosen.add(i);   // 全部外すのは不可
+    if (tmbChosen.size === tmbCount) tmbChosen = new Set();   // 全部＝空に戻す
+    tmbRefreshSelection();
+}
+
+function tmbRefreshSelection() {
+    const prev = document.getElementById('tmb-preview');
+    if (!prev) return;
+    const all = !tmbChosen.size;
+    prev.querySelectorAll('img').forEach((el, j) =>
+        el.classList.toggle('selected', all || tmbChosen.has(j)));
+
+    const n = tmbSelectedCount();
+    const label = document.getElementById('tmb-count');
+    if (label) label.textContent = `${n} / ${tmbCount} 枚`;
+
+    tmbAutoDraft(n);
+}
+
+function tmbAutoDraft(n) {
+    // しきい値以上で自動的に下書きへ。**手で操作したあとは介入しない。**
+    // 勝手に戻すと「外したのにまた入る」という体験になる。
+    const box = document.getElementById('tmb-draft');
+    const note = document.getElementById('tmb-draft-auto');
+    if (!box) return;
+    if (!tmbDraftManual) {
+        box.checked = n >= TMB_DRAFT_THRESHOLD;
+    }
+    if (note) {
+        note.style.display =
+            (!tmbDraftManual && box.checked && n >= TMB_DRAFT_THRESHOLD) ? '' : 'none';
+    }
+    tmbSyncButton();
+}
+
+function tmbDraftToggled(manual) {
+    if (manual) tmbDraftManual = true;
+    const note = document.getElementById('tmb-draft-auto');
+    if (note) note.style.display = 'none';
+    tmbSyncButton();
+}
+
+function tmbSyncButton() {
+    const box = document.getElementById('tmb-draft');
+    const ok = document.getElementById('tmb-ok');
+    if (box && ok) ok.textContent = box.checked ? '下書きに保存' : '投稿する';
+}
+
+// --- 開閉 -------------------------------------------------------------
 
 async function openTumblrShare(shortcode) {
     // 機能が無効なときはモーダル自体が描画されていない。
@@ -547,8 +601,9 @@ async function openTumblrShare(shortcode) {
     //   dev/lightbox_check.js の eval が構文エラーで落ちる）
     if (!document.getElementById('tmb-dlg')) return;
     tmbShortcode = shortcode;
-    tmbSelected = 0;
     tmbChosen = new Set();
+    tmbDraftManual = false;
+
     const btn = document.querySelector(`.tweet .tmb-btn[data-sc="${shortcode}"]`);
     const tweet = btn ? btn.closest('.tweet') : null;
 
@@ -563,7 +618,6 @@ async function openTumblrShare(shortcode) {
         'https://www.instagram.com/p/' + shortcode + '/ が出典として付きます';
 
     await tmbLoadAccounts();
-    const api = tmbApiMode();
 
     // カード上の画像をそのままプレビューに使う（追加リクエストなし）
     const prev = document.getElementById('tmb-preview');
@@ -573,49 +627,24 @@ async function openTumblrShare(shortcode) {
         tweet.querySelectorAll('.tweet-media img').forEach((img, i) => {
             const t = document.createElement('img');
             t.src = img.src;
-            // API方式は既定で全部選択、シェアツール方式は1枚目だけ
-            t.className = (api || i === 0) ? 'selected' : '';
-            t.title = api ? ((i + 1) + '枚目を外す/戻す') : ((i + 1) + '枚目を添付');
-            t.onclick = () => {
-                if (tmbApiMode()) {
-                    // 何も選ばれていない状態＝全部、なので初回タップで実体化する
-                    if (!tmbChosen.size) {
-                        for (let j = 0; j < tmbCount; j++) tmbChosen.add(j);
-                    }
-                    if (tmbChosen.has(i)) tmbChosen.delete(i); else tmbChosen.add(i);
-                    if (!tmbChosen.size) tmbChosen.add(i);   // 全部外すのは不可
-                    prev.querySelectorAll('img').forEach((el, j) =>
-                        el.classList.toggle('selected', tmbChosen.has(j)));
-                } else {
-                    tmbSelected = i;
-                    prev.querySelectorAll('img').forEach((el, j) =>
-                        el.classList.toggle('selected', j === i));
-                }
-            };
+            t.className = 'selected';          // 既定は全部選択
+            t.title = (i + 1) + '枚目を外す/戻す';
+            t.onclick = () => tmbToggleImage(i);
             prev.appendChild(t);
             tmbCount++;
         });
     }
 
     const multi = tmbCount > 1;
-    // API方式：投稿先と下書きトグルを出す。枚数の制約は無い
+    // 投稿先は複数アカウントを登録しているときだけ選ばせる
     document.getElementById('tmb-account-wrap').style.display =
-        (api && (tmbAccounts.accounts || []).length > 1) ? '' : 'none';
-    document.getElementById('tmb-draft-wrap').style.display = api ? '' : 'none';
-    document.getElementById('tmb-multi-note').style.display = (api && multi) ? '' : 'none';
-    // シェアツール方式：1枚だけの注記と実験トグル
-    document.getElementById('tmb-link-note').style.display =
-        (!api && multi && !tmbSendAll) ? '' : 'none';
-    document.getElementById('tmb-all-wrap').style.display = (!api && multi) ? '' : 'none';
-    document.getElementById('tmb-all').checked = tmbSendAll;
-    document.getElementById('tmb-all-note').style.display =
-        (!api && multi && tmbSendAll) ? '' : 'none';
-    prev.classList.toggle('all-mode', !api && tmbSendAll);
+        ((tmbAccounts.accounts || []).length > 1) ? '' : 'none';
+    document.getElementById('tmb-multi-note').style.display = multi ? '' : 'none';
 
     const ok = document.getElementById('tmb-ok');
     ok.disabled = false;
     document.getElementById('tmb-draft').checked = false;
-    ok.textContent = api ? '投稿する' : 'Tumblr を開く';
+    tmbRefreshSelection();       // 枚数表示と自動下書きをここで確定させる
 
     document.getElementById('tmb-dlg').classList.add('open');
     document.addEventListener('keydown', tmbKey, true);
@@ -636,10 +665,11 @@ function tmbKey(e) {
 }
 
 function tmbConfirm() {
-    return tmbApiMode() ? tmbPost() : tmbOpenShareTool();
+    return tmbPost();
 }
 
-// --- API方式：直接投稿する -------------------------------------------
+// --- 投稿 -------------------------------------------------------------
+
 async function tmbPost() {
     if (!tmbShortcode) return;
     const ok = document.getElementById('tmb-ok');
@@ -651,9 +681,10 @@ async function tmbPost() {
     ok.textContent = '投稿中...';
     msg.textContent = '';
 
+    const sel = document.getElementById('tmb-account');
     const body = {
         shortcode: sc,
-        account: document.getElementById('tmb-account').value || '',
+        account: (sel && sel.value) || '',
         caption: document.getElementById('tmb-caption').value.trim(),
         tags: document.getElementById('tmb-tags').value.trim(),
         state: draft ? 'draft' : 'published',
@@ -693,57 +724,5 @@ function tmbToast(data, draft) {
     document.body.appendChild(el);
     setTimeout(() => el.classList.add('show'), 10);
     setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 6000);
-}
-
-// --- シェアツール方式：Tumblrのポップアップを開く ---------------------
-async function tmbOpenShareTool() {
-    if (!tmbShortcode) return;
-    const ok = document.getElementById('tmb-ok');
-    const msg = document.getElementById('tmb-msg');
-    const caption = document.getElementById('tmb-caption').value.trim();
-    const tags = document.getElementById('tmb-tags').value.trim();
-
-    ok.disabled = true; ok.textContent = '準備中...';
-    msg.textContent = '';
-
-    let data;
-    try {
-        const res = await fetch('/api/share/prepare', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({shortcode: tmbShortcode, caption: caption, tags: tags})
-        });
-        data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-    } catch (err) {
-        msg.textContent = '失敗: ' + err.message;
-        ok.disabled = false; ok.textContent = 'Tumblr を開く';
-        return;
-    }
-
-    const params = new URLSearchParams();
-    params.set('posttype', 'photo');
-
-    const urls = data.image_urls || [];
-    if (!urls.length) {
-        msg.textContent = '失敗: 画像URLが取得できませんでした';
-        ok.disabled = false; ok.textContent = 'Tumblr を開く';
-        return;
-    }
-    if (tmbSendAll) {
-        // 本来の仕様どおりの渡し方。Tumblr 側が直れば全部入る
-        params.set('content', urls.join(','));
-    } else {
-        params.set('content', urls[Math.min(tmbSelected, urls.length - 1)]);
-    }
-
-    const srcUrl = data.source_url;
-    if (srcUrl) params.set('canonicalUrl', srcUrl);
-    if (caption) params.set('caption', srcUrl ? `<a href="${srcUrl}">${caption}</a>` : caption);
-    if (tags) params.set('tags', tags);
-
-    window.open('https://www.tumblr.com/widgets/share/tool?' + params.toString(),
-                '_blank', 'width=540,height=600');
-    closeTumblrShare();
 }
 </script>

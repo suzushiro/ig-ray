@@ -291,10 +291,11 @@ def test_share_domain_not_committed(files):
     p = os.path.join(ROOT, ".env.example")
     if os.path.exists(p):
         text = open(p, encoding="utf-8").read()
-        check("PUBLIC_SHARE_BASE_URL がコメントアウトされている",
-              not re.search(r"^IG_RAY_PUBLIC_SHARE_BASE_URL=\S", text, re.M))
-        check("PUBLIC_SHARE_HOST がコメントアウトされている",
-              not re.search(r"^IG_RAY_PUBLIC_SHARE_HOST=\S", text, re.M))
+        # Tumblr のキーは実値を置かない（トークン本体は data/ に置く）
+        check("TUMBLR_CONSUMER_KEY に実値が無い",
+              not re.search(r"^TUMBLR_CONSUMER_KEY=\S", text, re.M))
+        check("TUMBLR_CONSUMER_SECRET に実値が無い",
+              not re.search(r"^TUMBLR_CONSUMER_SECRET=\S", text, re.M))
 
 
 def main():

@@ -511,21 +511,26 @@ console.log('\n' + '='.repeat(50));
 // --- Tumblr モーダル：キャプションの初期値 ---------------------------
 // 「投稿者名が入る」はDOMを動かさないと確かめられない
 // （テンプレートに文字列があることと、実際に値が入ることは別）。
-function buildTumblrDom() {
+function buildTumblrDom(nImages) {
+    // 実物のモーダルと同じIDを並べる。
+    // ここが実物とズレると「テストは通るが本番で落ちる」ので、
+    // ID の整合は dev/tumblr_web_check.py [8] でも突き合わせている。
+    const imgs = [...Array(nImages || 2)]
+        .map((_, i) => `<img src="i${i}.jpg">`).join('');
     const dom = new JSDOM(`<!DOCTYPE html><html><body>
         <div class="tweet" data-owner="testuser">
-          <div class="tweet-media"><img src="a.jpg"><img src="b.jpg"></div>
+          <div class="tweet-media">${imgs}</div>
           <button class="tmb-btn" data-sc="SC1">t</button>
         </div>
         <div class="dlg-wrap" id="tmb-dlg"><div class="dlg">
-          <div id="tmb-multi-note"></div>
+          <div class="tmb-select-bar" id="tmb-multi-note">
+            <span id="tmb-count"></span>
+          </div>
           <div class="tmb-preview" id="tmb-preview"></div>
-          <div id="tmb-link-note"></div>
-          <label id="tmb-all-wrap"><input type="checkbox" id="tmb-all"></label>
-          <div id="tmb-all-note"></div>
           <div id="tmb-account-wrap"><select id="tmb-account"></select></div>
           <textarea id="tmb-caption"></textarea><input type="text" id="tmb-tags">
           <label id="tmb-draft-wrap"><input type="checkbox" id="tmb-draft"></label>
+          <div id="tmb-draft-auto" style="display:none"></div>
           <div id="tmb-src"></div><div id="tmb-msg"></div><button id="tmb-ok"></button>
         </div></div>
         </body></html>`, {
@@ -539,23 +544,126 @@ function buildTumblrDom() {
     };
     dom.window.localStorage.setItem('instaray-theme', 'light');
     dom.window.eval(stripJinja(code));
-    // API未設定＝シェアツール方式として動かす
-    dom.window.fetch = async () => ({json: async () => ({enabled: false, accounts: []})});
+    // Tumblr API が設定済みの状態にする
+    dom.window.fetch = async () => ({json: async () => ({
+        enabled: true,
+        accounts: [{label: 'main', blog: 'myblog'}],
+    })});
     return dom;
 }
 
+function selectedCount(d) {
+    return d.querySelectorAll('#tmb-preview img.selected').length;
+}
+
     // --- Tumblr モーダル（同じ async IIFE の中で await する）---
-    console.log('\n[Tumblr] モーダルのキャプション初期値');
-    const dom = buildTumblrDom();
-    await dom.window.openTumblrShare('SC1');
-    const d = dom.window.document;
-    check('キャプションに投稿者名が入る',
-          d.getElementById('tmb-caption').value === 'testuser',
-          d.getElementById('tmb-caption').value);
-    check('プレビューに枚数分の画像が並ぶ',
-          d.querySelectorAll('#tmb-preview img').length === 2);
-    check('出典の案内に shortcode が出る',
-          d.getElementById('tmb-src').textContent.includes('SC1'));
+    console.log('\n[Tumblr] モーダルの初期状態');
+    {
+        const dom = buildTumblrDom(2);
+        await dom.window.openTumblrShare('SC1');
+        const d = dom.window.document;
+        check('キャプションに投稿者名が入る',
+              d.getElementById('tmb-caption').value === 'testuser',
+              d.getElementById('tmb-caption').value);
+        check('プレビューに枚数分の画像が並ぶ',
+              d.querySelectorAll('#tmb-preview img').length === 2);
+        check('出典の案内に shortcode が出る',
+              d.getElementById('tmb-src').textContent.includes('SC1'));
+        // 既定は全部選択（API方式は複数枚をそのまま投稿できる）
+        check('既定で全部選択されている', selectedCount(d) === 2,
+              String(selectedCount(d)));
+        check('枚数が表示される',
+              d.getElementById('tmb-count').textContent === '2 / 2 枚',
+              d.getElementById('tmb-count').textContent);
+        check('2枚では下書きにならない',
+              d.getElementById('tmb-draft').checked === false);
+        check('ボタンは「投稿する」',
+              d.getElementById('tmb-ok').textContent === '投稿する',
+              d.getElementById('tmb-ok').textContent);
+    }
+
+    console.log('\n[Tumblr] 選択の操作');
+    {
+        const dom = buildTumblrDom(4);
+        await dom.window.openTumblrShare('SC1');
+        const d = dom.window.document;
+        const w = dom.window;
+
+        check('4枚とも選択されている', selectedCount(d) === 4, String(selectedCount(d)));
+
+        w.tmbSelectFirst();
+        check('「1枚目だけ」で1枚になる', selectedCount(d) === 1, String(selectedCount(d)));
+        check('残ったのは1枚目',
+              d.querySelectorAll('#tmb-preview img')[0].classList.contains('selected'));
+        check('枚数表示が追随する',
+              d.getElementById('tmb-count').textContent === '1 / 4 枚',
+              d.getElementById('tmb-count').textContent);
+
+        w.tmbSelectAll();
+        check('「全選択」で全部戻る', selectedCount(d) === 4, String(selectedCount(d)));
+
+        // タップで外す／戻す
+        d.querySelectorAll('#tmb-preview img')[1].click();
+        check('タップで1枚外れる', selectedCount(d) === 3, String(selectedCount(d)));
+        d.querySelectorAll('#tmb-preview img')[1].click();
+        check('もう一度タップで戻る', selectedCount(d) === 4, String(selectedCount(d)));
+
+        // 全部は外せない
+        w.tmbSelectFirst();
+        d.querySelectorAll('#tmb-preview img')[0].click();
+        check('最後の1枚は外せない', selectedCount(d) >= 1, String(selectedCount(d)));
+    }
+
+    console.log('\n[Tumblr] 3枚以上で自動的に下書き');
+    {
+        const dom = buildTumblrDom(3);
+        await dom.window.openTumblrShare('SC1');
+        const d = dom.window.document;
+        const w = dom.window;
+
+        check('3枚なら開いた時点で下書き',
+              d.getElementById('tmb-draft').checked === true);
+        check('自動でチェックした旨が出る',
+              d.getElementById('tmb-draft-auto').style.display !== 'none');
+        check('ボタンが「下書きに保存」になる',
+              d.getElementById('tmb-ok').textContent === '下書きに保存',
+              d.getElementById('tmb-ok').textContent);
+
+        // 2枚まで減らすと自動で外れる
+        d.querySelectorAll('#tmb-preview img')[0].click();
+        check('2枚に減らすと下書きが外れる',
+              d.getElementById('tmb-draft').checked === false);
+        check('注記も消える',
+              d.getElementById('tmb-draft-auto').style.display === 'none');
+
+        // 手で操作したら以降は介入しない
+        const box = d.getElementById('tmb-draft');
+        box.checked = true;
+        w.tmbDraftToggled(true);
+        w.tmbSelectAll();                     // 3枚に戻す
+        check('手動操作後は自動判定が介入しない',
+              box.checked === true);
+        box.checked = false;
+        w.tmbDraftToggled(true);
+        w.tmbSelectAll();
+        check('手で外したら3枚でも下書きにしない', box.checked === false);
+        check('その場合ボタンは「投稿する」',
+              d.getElementById('tmb-ok').textContent === '投稿する',
+              d.getElementById('tmb-ok').textContent);
+    }
+
+    console.log('\n[Tumblr] 1枚の投稿');
+    {
+        const dom = buildTumblrDom(1);
+        await dom.window.openTumblrShare('SC1');
+        const d = dom.window.document;
+        check('選択バーは出ない',
+              d.getElementById('tmb-multi-note').style.display === 'none',
+              d.getElementById('tmb-multi-note').style.display);
+        check('1枚が選択されている', selectedCount(d) === 1);
+        check('下書きにはならない',
+              d.getElementById('tmb-draft').checked === false);
+    }
 
     summary();
 })();
