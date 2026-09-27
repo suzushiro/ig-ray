@@ -1,358 +1,337 @@
 """
 ig-ray / dev/tumblr_web_check.py
 
-Tumblr 投稿の **Web層**（エンドポイントとUI）の検証。外部ネットワークは使わない。
+Tumblr 投稿の**表示層**の検査（share_check.py の後継）。
+
+v4.16 で投稿経路は OAuth API 直叩きのみになり、
+一時公開URL（/share, /share-img, /api/share/prepare）は撤去した。
+ここではその撤去と、モーダルの HTML と JS が食い違っていないかを見る。
+
+**HTML と JS の ID 突き合わせを両方向でやるのが本命。**
+v4.15 で「バックエンドと HTML は直したが JS が古い」状態を出荷して
+openTumblrShare が TypeError で落ちた。片方向だけでは拾えない。
 
     python3 dev/tumblr_web_check.py
-
-`dev/tumblr_check.py` が `tumblr_client` 単体（OAuth署名・multipart）を見るのに対し、
-こちらは Flask のルートとテンプレートを見る。
-
-旧 `dev/share_check.py` の後継。シェアツール方式（一時公開URL・`/share`・
-`share_tokens`）は撤去したので、それらのテストは丸ごと落とし、
-**マクロの `with context`** と **実ボタンの数** の検査だけ引き継いでいる。
-
-とくに見ているのは:
-  - `t` ボタンが「ローカル実体のある静止画がある投稿」にだけ出ること
-  - **実ボタンの数**（`'openTumblrShare' in html` はJS定義にマッチして通る）
-  - マクロを `with context` で import しているか（欠けるとボタンが消える）
-  - 未設定なら機能まるごと無効になること
-  - **モーダルが参照するIDが全部テンプレートに存在すること**
-    （HTMLだけ直してJSが追随せず、開いた瞬間に落ちる事故を防ぐ）
 """
 
-import importlib
 import json
 import os
 import re
 import sys
 import tempfile
-import threading
-
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.join(HERE, "..")
+TPL = os.path.join(ROOT, "app", "templates")
 
 PASS, FAIL = [], []
 
 
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
-    mark = "PASS" if cond else "FAIL"
-    print(f"  {mark}  {name}{('  -- ' + detail) if detail and not cond else ''}")
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}"
+          f"{('  -- ' + detail) if detail and not cond else ''}")
+
+
+def read(name):
+    with open(os.path.join(TPL, name), encoding="utf-8") as f:
+        return f.read()
 
 
 # --------------------------------------------------------------------------
+# 1. 旧方式が本当に消えているか
+# --------------------------------------------------------------------------
 
-def build_env(tmp, key="ck", secret="cs", accounts=True):
-    """環境変数を立て直してから web を読み込む（モジュール定数を作り直す）。"""
-    cache = os.path.join(tmp, "cache")
-    os.makedirs(os.path.join(cache, "AB"), exist_ok=True)
-    os.environ["IG_RAY_DB"] = os.path.join(tmp, "t.db")
-    os.environ["IG_RAY_CACHE"] = cache
-    os.environ["TUMBLR_CONSUMER_KEY"] = key
-    os.environ["TUMBLR_CONSUMER_SECRET"] = secret
+def test_legacy_gone():
+    print("\n[1] 旧シェアツール方式の撤去")
+    py = os.path.join(ROOT, "app", "web.py")
+    with open(py, encoding="utf-8") as f:
+        web_src = f.read()
 
-    path = os.path.join(tmp, "tumblr_accounts.json")
-    if accounts:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"accounts": [
-                {"label": "main", "blog": "myblog", "token": "t", "secret": "s"},
-                {"label": "sub", "blog": "subblog", "token": "t2", "secret": "s2"},
-            ]}, f)
-    elif os.path.exists(path):
-        os.remove(path)
-    os.environ["TUMBLR_ACCOUNTS_FILE"] = path
+    for token in ("/api/share/prepare", '@app.route("/share/<token>")',
+                  "share-img", "SHARE_ENABLED", "PUBLIC_SHARE_BASE_URL",
+                  "SHARE_TOKEN_TTL_MIN", "widgets/share/tool"):
+        check(f"web.py に {token} が残っていない", token not in web_src)
 
-    import config
-    importlib.reload(config)
+    with open(os.path.join(ROOT, "app", "db.py"), encoding="utf-8") as f:
+        db_src = f.read()
+    for token in ("create_share_token", "get_share_payload",
+                  "purge_expired_share_tokens",
+                  "CREATE TABLE IF NOT EXISTS share_tokens"):
+        check(f"db.py に {token} が残っていない", token not in db_src)
+    check("db.py は share_tokens を落とす",
+          "DROP TABLE IF EXISTS share_tokens" in db_src)
+
+    check("share.html が消えている",
+          not os.path.exists(os.path.join(TPL, "share.html")))
+    check("dev/share_check.py が消えている",
+          not os.path.exists(os.path.join(HERE, "share_check.py")))
+
+    js = read("_scripts.html")
+    for token in ("tmbOpenShareTool", "tmbSendAll", "tmbSelected",
+                  "tmb-all", "tmb-link-note", "all-mode",
+                  "widgets/share/tool"):
+        check(f"_scripts.html に {token} が残っていない", token not in js)
+
+    compose = os.path.join(ROOT, "docker-compose.yml")
+    with open(compose, encoding="utf-8") as f:
+        cs = f.read()
+    check("compose に PUBLIC_SHARE_BASE_URL が無い",
+          "PUBLIC_SHARE_BASE_URL" not in cs)
+    check("compose に SHARE_TOKEN_TTL_MIN が無い",
+          "SHARE_TOKEN_TTL_MIN" not in cs)
+    check("compose は TUMBLR_CONSUMER_KEY を渡す", "TUMBLR_CONSUMER_KEY" in cs)
+
+
+# --------------------------------------------------------------------------
+# 2. HTML と JS の ID 突き合わせ（両方向）
+# --------------------------------------------------------------------------
+
+def test_id_crosscheck():
+    print("\n[2] モーダルの ID を HTML と JS で突き合わせる")
+    src = read("_scripts.html")
+
+    # モーダルの markup 部分だけを切り出す
+    i = src.find('<div class="dlg-wrap" id="tmb-dlg">')
+    j = src.find("<script>", i)
+    check("モーダルの markup が見つかる", i != -1 and j > i)
+    if i == -1 or j <= i:
+        return
+    markup, script = src[i:j], src[j:]
+
+    html_ids = set(re.findall(r'id="(tmb-[a-z0-9-]+)"', markup))
+    # JS が触る ID（getElementById / tmbEl / tmbShow の引数）
+    js_ids = set(re.findall(
+        r"(?:getElementById|tmbEl|tmbShow)\(\s*'(tmb-[a-z0-9-]+)'", script))
+
+    check("HTML 側の ID が取れている", len(html_ids) >= 8, str(sorted(html_ids)))
+    check("JS 側の ID が取れている", len(js_ids) >= 8, str(sorted(js_ids)))
+
+    # → JS が存在しない ID を触っていないか（v4.15 で踏んだ向き）
+    missing = sorted(js_ids - html_ids)
+    check("JS が触る ID はすべて HTML にある", not missing, str(missing))
+
+    # ← HTML にあるのに JS が一切触らない ID（消し忘れの markup）
+    # 静的に置いてあるだけの要素は除く
+    static_ok = {"tmb-dlg-title"}
+    unused = sorted(html_ids - js_ids - static_ok)
+    check("HTML の ID はすべて JS から使われる", not unused, str(unused))
+
+    # onclick で呼ぶ関数がすべて定義されているか
+    handlers = set(re.findall(r'on(?:click|change)="(tmb[A-Za-z]+)\(', markup))
+    handlers |= set(re.findall(r'on(?:click|change)="(\w*[Tt]umblr\w*)\(', markup))
+    defined = set(re.findall(r"function\s+(\w+)\s*\(", script))
+    defined |= set(re.findall(r"async\s+function\s+(\w+)\s*\(", script))
+    undef = sorted(h for h in handlers if h not in defined)
+    check("onclick/onchange の関数はすべて定義済み", not undef, str(undef))
+
+    # マクロ側の呼び出しも同じ関数集合で解決できるか
+    macros = read("_macros.html")
+    called = set(re.findall(r'onclick="(\w+)\(', macros))
+    tmb_called = {c for c in called if "umblr" in c or c.startswith("tmb")}
+    check("マクロの openTumblrShare が定義済み",
+          tmb_called <= defined, str(sorted(tmb_called - defined)))
+
+
+# --------------------------------------------------------------------------
+# 3. 新しい挙動が markup / JS に入っているか
+# --------------------------------------------------------------------------
+
+def test_new_behaviour():
+    print("\n[3] 全選択・自動下書きの実装")
+    src = read("_scripts.html")
+
+    check("全部選ぶボタンがある", 'onclick="tmbSelectAll()"' in src)
+    check("1枚目だけボタンがある", 'onclick="tmbSelectFirst()"' in src)
+    check("選択枚数の表示欄がある", 'id="tmb-sel-count"' in src)
+    check("自動下書きの注記欄がある", 'id="tmb-draft-auto"' in src)
+
+    check("既定は全選択（selected を付けて生成）",
+          "t.className = 'selected';" in src)
+    check("しきい値が定数になっている", "TMB_DRAFT_THRESHOLD = 3" in src)
+    check("しきい値は3枚", re.search(r"TMB_DRAFT_THRESHOLD\s*=\s*3\b", src))
+    check("自動下書きの判定がしきい値を使う",
+          "n >= TMB_DRAFT_THRESHOLD" in src)
+    check("手動操作を記録する変数がある", "tmbDraftManual" in src)
+    check("手動操作後は自動で書き換えない",
+          "if (!tmbDraftManual) cb.checked" in src)
+    check("onchange は manual を渡す",
+          'onchange="tmbDraftToggled(true)"' in src)
+
+    check("空の選択は全部として扱う", "if (!tmbChosen.size)" in src)
+    check("全部外すのは不可", "tmbChosen.add(i);   // 全部外すのは不可" in src)
+    check("絞ったときだけ indices を送る",
+          "eff.length < tmbCount" in src)
+
+    # 任意要素は tmbEl/tmbShow 経由（null で落ちない）
+    direct = re.findall(r"document\.getElementById\('(tmb-[a-z0-9-]+)'\)\.", src)
+    allowed = {"tmb-dlg"}      # 存在を先に確認しているもの
+    bad = sorted(set(direct) - allowed)
+    check("任意要素は直接 .style/.value を触らない", not bad, str(bad))
+
+    print("\n[4] CSS")
+    css = read("_style.html")
+    check("--bg-card が light で定義されている",
+          re.search(r":root\s*\{[^}]*--bg-card:", css, re.S))
+    check("--bg-card が dark でも定義されている",
+          re.search(r'\[data-theme="dark"\]\s*\{[^}]*--bg-card:', css, re.S))
+    check(".tmb-sel-bar がある", ".tmb-sel-bar" in css)
+    check(".tmb-sel-btn がある", ".tmb-sel-btn" in css)
+    check(".all-mode が残っていない", "all-mode" not in css)
+
+    # var(--x) で使っている変数がすべて定義されているか（透過バグの再発防止）
+    used = set(re.findall(r"var\(--([a-z0-9-]+)", css))
+    for name in ("_style.html",):
+        pass
+    declared = set(re.findall(r"--([a-z0-9-]+)\s*:", css))
+    for other in ("backup.html", "mutes.html", "storage.html", "user.html",
+                  "index.html", "gallery.html", "bookmarks.html",
+                  "_macros.html", "_scripts.html", "_nav.html",
+                  "_feed.html", "_gallery_items.html"):
+        used |= set(re.findall(r"var\(--([a-z0-9-]+)", read(other)))
+    # フォールバック付き var(--x, y) は未定義でも成立する
+    undef = sorted(u for u in used - declared
+                   if not re.search(r"var\(--" + re.escape(u) + r"\s*,", css))
+    check("使っている CSS 変数はすべて定義済み", not undef, str(undef))
+
+
+# --------------------------------------------------------------------------
+# 4. ルート
+# --------------------------------------------------------------------------
+
+def build_db(path):
     import db
-    importlib.reload(db)
-    import cache_utils
-    importlib.reload(cache_utils)
-    # web より先に読み直す（web が import 時のモジュール定数を見るため）
-    import tumblr_client
-    importlib.reload(tumblr_client)
+    c = db.connect(path)
+    db.init_db(c)
+    c.execute("INSERT INTO accounts (username, is_enabled, is_target) "
+              "VALUES ('u1', 1, 1)")
+    db.save_posts(c, [dict(
+        shortcode="SC1", mediaid=None, owner_username="u1", caption="x",
+        date_utc="2026-07-30T10:00:00+00:00", likes=1, comments=0,
+        typename="GraphImage", is_video=0, is_carousel=0, location=None,
+        hashtags_json="[]",
+        media_json=json.dumps([{"index": 0, "is_video": False,
+                                "image_url": "https://cdn.example/0.jpg",
+                                "video_url": None}]),
+        local_media_json=None)])
+    # `t` ボタンは**ローカルに静止画の実体がある投稿だけ**に出る。
+    # 実体を作らないと has_local=False でボタンが出ず、
+    # 「出ないのが正しい」のか「壊れている」のか区別できない。
+    cache = os.environ["IG_RAY_CACHE"]
+    os.makedirs(os.path.join(cache, "SC"), exist_ok=True)
+    local = os.path.join(cache, "SC", "SC1_0.jpg")
+    with open(local, "wb") as f:
+        f.write(b"\xff\xd8\xff\xd9")      # 最小の JPEG っぽいバイト列
+    c.execute(
+        "INSERT INTO media_index (shortcode, media_index, is_video, "
+        "  remote_url, local_path) VALUES ('SC1', 0, 0, ?, ?)",
+        ("https://cdn.example/0.jpg", local))
+    c.commit()
+    return c
+
+
+def test_routes(cli):
+    print("\n[5] ルート")
+    for path in ("/share/abc", "/share-img/abc/0"):
+        check(f"{path} は 404", cli.get(path).status_code == 404)
+    r = cli.post("/api/share/prepare", json={"shortcode": "SC1"})
+    check("/api/share/prepare は 404/405",
+          r.status_code in (404, 405), str(r.status_code))
+
+    r = cli.get("/api/tumblr/accounts")
+    check("/api/tumblr/accounts は 200", r.status_code == 200)
+    data = r.get_json()
+    check("enabled を返す", "enabled" in data, str(data))
+    check("未設定なら enabled=False", data.get("enabled") is False, str(data))
+    check("トークンを返さない", "token" not in json.dumps(data))
+
+    r = cli.post("/api/tumblr/post", json={"shortcode": "SC1"})
+    check("未設定なら投稿は 400", r.status_code == 400, str(r.status_code))
+
+    print("\n[6] 未設定なら t ボタンを出さない")
+    body = cli.get("/").get_data(as_text=True)
+    check("tmb-btn が出ない", 'class="tmb-btn"' not in body)
+    check("モーダルも描画されない", 'id="tmb-dlg"' not in body)
+
+
+def test_enabled_flags():
+    print("\n[7] 設定済みならボタンとモーダルが出る")
     import web
-    importlib.reload(web)
-    web.app.testing = True
-    return db, web, cache
+    import tumblr_client
+    orig = tumblr_client.is_configured
+    tumblr_client.is_configured = lambda: True
+    try:
+        with web.app.test_request_context("/"):
+            flags = web._inject_share_flags()
+        check("share_enabled が True", flags["share_enabled"] is True, str(flags))
+        check("tumblr_api_enabled が True", flags["tumblr_api_enabled"] is True)
+        check("share_link_enabled は無くなった", "share_link_enabled" not in flags)
+        with web.app.test_client() as cli:
+            body = cli.get("/").get_data(as_text=True)
+        check("t ボタンが出る", 'class="tmb-btn"' in body)
+        check("モーダルが描画される", 'id="tmb-dlg"' in body)
+        check("選択バーが描画される", 'id="tmb-sel-bar"' in body)
+        check("自動下書きの注記が描画される", 'id="tmb-draft-auto"' in body)
+    finally:
+        tumblr_client.is_configured = orig
 
 
-def seed(db, cache):
-    """
-    投稿を3件。
-      LOCAL1 … ローカル画像2枚（投稿できる）
-      REMOTE … ローカル実体なし（投稿できない）
-      VIDONLY… 動画1件のみ（投稿できない）
-    """
-    conn = db.connect()
-    db.init_db(conn)
-    conn.execute("INSERT INTO accounts (username) VALUES ('alpha')")
-
-    def mkfile(rel):
-        p = os.path.join(cache, rel)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "wb") as f:
-            f.write(b"\xff\xd8\xff" + b"x" * 200)
-        return p
-
-    def mkpost(sc, media, rows):
-        conn.execute(
-            "INSERT INTO posts (shortcode, owner_username, date_utc, media_json) "
-            "VALUES (?,?,?,?)",
-            (sc, "alpha", "2026-05-01T00:00:00+00:00", json.dumps(media)))
-        for idx, local, is_vid in rows:
-            conn.execute(
-                "INSERT INTO media_index (shortcode, media_index, local_path, is_video) "
-                "VALUES (?,?,?,?)", (sc, idx, local, 1 if is_vid else 0))
-
-    mkpost("LOCAL1",
-           [{"index": 0, "is_video": False, "image_url": "https://cdn.example/0.jpg"},
-            {"index": 1, "is_video": False, "image_url": "https://cdn.example/1.jpg"}],
-           [(0, mkfile("AB/LOCAL1_0.jpg"), False),
-            (1, mkfile("AB/LOCAL1_1.jpg"), False)])
-    mkpost("REMOTE",
-           [{"index": 0, "is_video": False, "image_url": "https://cdn.example/r.jpg"}],
-           [(0, None, False)])
-    mkpost("VIDONLY",
-           [{"index": 0, "is_video": True, "image_url": "https://cdn.example/v.jpg"}],
-           [(0, mkfile("AB/VIDONLY_0.jpg"), True)])
-    conn.commit()
-    conn.close()
-
-
-def start_mock():
-    """投稿先の Tumblr API を差し替える。"""
-    hits = []
-
-    class H(BaseHTTPRequestHandler):
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            hits.append({"path": self.path, "body": self.rfile.read(n)})
-            raw = json.dumps({"response": {"id_string": "999"}}).encode()
-            self.send_response(201)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-
-        def log_message(self, *a):
-            pass
-
-    srv = HTTPServer(("127.0.0.1", 0), H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, hits
-
-
-# --------------------------------------------------------------------------
-
-def test_accounts(cl):
-    print("\n[1] /api/tumblr/accounts")
-    r = cl.get("/api/tumblr/accounts")
-    check("200 で返る", r.status_code == 200, str(r.status_code))
-    d = r.get_json()
-    check("enabled=True", d.get("enabled") is True, str(d))
-    check("2件返る", len(d.get("accounts") or []) == 2, str(d))
-    # **ここが漏れると投稿権限そのものが漏れる**
-    blob = json.dumps(d)
-    check("トークンを返さない", "token" not in blob and '"secret"' not in blob, blob)
-
-
-def test_post(cl, hits):
-    print("\n[2] /api/tumblr/post")
-    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "account": "main"})
-    check("200 で返る", r.status_code == 200,
-          f"{r.status_code} {r.get_json()}")
-    d = r.get_json()
-    check("ok=True", d.get("ok") is True, str(d))
-    check("枚数を返す", d.get("count") == 2, str(d.get("count")))
-    check("投稿URLを返す", "999" in (d.get("post_url") or ""), str(d))
-    check("投稿先ラベルを返す", d.get("label") == "main", str(d.get("label")))
-
-    body = hits[-1]["body"]
-    check("正しいブログへ", hits[-1]["path"].endswith("/blog/myblog/post"),
-          hits[-1]["path"])
-    check("2枚とも送っている",
-          b'name="data[0]"' in body and b'name="data[1]"' in body)
-    check("出典が付く", b"instagram.com/p/LOCAL1/" in body)
-
-    # 投稿先を切り替えられる
-    cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "account": "sub"})
-    check("別アカウントへ投稿できる",
-          hits[-1]["path"].endswith("/blog/subblog/post"), hits[-1]["path"])
-
-
-def test_indices(cl, hits):
-    print("\n[3] 添付する画像の絞り込み")
-    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "indices": "1"})
-    check("indices で絞れる", r.get_json().get("count") == 1, str(r.get_json()))
-    body = hits[-1]["body"]
-    check("1枚だけ送る",
-          b'name="data[0]"' in body and b'name="data[1]"' not in body)
-
-    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "indices": "0,1"})
-    check("全部指定でも通る", r.get_json().get("count") == 2, str(r.get_json()))
-
-    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "indices": "x"})
-    check("不正な indices は400", r.status_code == 400, str(r.status_code))
-
-
-def test_state(cl, hits):
-    print("\n[4] 公開状態")
-    cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "state": "draft"})
-    check("draft を送れる", b"draft" in hits[-1]["body"])
-    cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1"})
-    check("既定は published", b"published" in hits[-1]["body"])
-    r = cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1", "state": "bogus"})
-    check("不正な state は400", r.status_code == 400, str(r.status_code))
-
-
-def test_errors(cl):
-    print("\n[5] 異常系")
-    check("ローカル画像なしは400",
-          cl.post("/api/tumblr/post", json={"shortcode": "REMOTE"}).status_code == 400)
-    check("動画のみも400",
-          cl.post("/api/tumblr/post", json={"shortcode": "VIDONLY"}).status_code == 400)
-    check("存在しない投稿は400",
-          cl.post("/api/tumblr/post", json={"shortcode": "NOPE"}).status_code == 400)
-    check("shortcode なしは400",
-          cl.post("/api/tumblr/post", json={}).status_code == 400)
-    check("存在しないアカウントは400",
-          cl.post("/api/tumblr/post",
-                  json={"shortcode": "LOCAL1", "account": "nosuch"}).status_code == 400)
-
-
-def test_buttons(cl):
-    print("\n[6] 実ボタンが描画されているか")
-    h = cl.get("/").get_data(as_text=True)
-
-    # **ここが要点。** 'openTumblrShare' in html だとJS関数の定義にマッチして
-    # ボタンが0個でも通ってしまう（X-Ray で実際に見逃した）。
-    n = h.count('onclick="openTumblrShare')
-    check("t ボタンが投稿の数だけ出る", n == 1, f"count={n}")
-    check("LOCAL1 のボタンがある", "openTumblrShare('LOCAL1')" in h)
-    check("REMOTE のボタンは出ない", "openTumblrShare('REMOTE')" not in h)
-    check("VIDONLY のボタンは出ない", "openTumblrShare('VIDONLY')" not in h)
-    check("モーダルが描画されている", 'id="tmb-dlg"' in h)
-    check("カードに data-owner がある", 'data-owner="alpha"' in h)
-
-    for path in ("/user/alpha", "/bookmarks", "/gallery"):
-        r = cl.get(path)
-        check(f"{path} が 200", r.status_code == 200, str(r.status_code))
-
-
-def test_macro_with_context():
-    print("\n[7] マクロの with context")
-    # `{% from '_macros.html' import post_card %}` のままだと
-    # context_processor で入れた share_enabled がマクロ内から見えず、
-    # ボタンが一切描画されない（X-Ray で実際に踏んだ）。
-    tpl = os.path.join(os.path.dirname(__file__), "..", "app", "templates")
-    missing = [fn for fn in os.listdir(tpl)
-               if fn.endswith(".html")
-               and "import post_card" in open(os.path.join(tpl, fn),
-                                              encoding="utf-8").read()
-               and "with context" not in open(os.path.join(tpl, fn),
-                                              encoding="utf-8").read()]
-    check("post_card を import する全テンプレートに with context がある",
-          not missing, str(missing))
-
-
-def test_modal_ids(cl):
-    print("\n[8] JSが触るIDがテンプレートに存在するか")
-    # HTMLだけ直してJSが追随しないと、開いた瞬間に
-    # `getElementById(...).style` が TypeError で落ちてモーダルが開かない。
-    # 実際に一度この状態になった（2026-09）。
-    h = cl.get("/").get_data(as_text=True)
-    js = open(os.path.join(os.path.dirname(__file__), "..", "app", "templates",
-                           "_scripts.html"), encoding="utf-8").read()
-
-    # **両方向で突き合わせる。**
-    # 「null チェックが無いものだけ」に絞ると、
-    #   const note = getElementById('x'); if (note) note.style...
-    # のような書き方を見逃す。実行時に落ちなくても、
-    # IDのズレはHTMLとJSが食い違っている証拠なので落とす。
-    used = set(re.findall(r"getElementById\(\s*['\"](tmb-[\w-]+)['\"]", js))
-    ids = set(re.findall(r'id="(tmb-[\w-]+)"', h))
-
-    missing = sorted(used - ids)
-    check("JSが触るIDがテンプレートに全部ある", not missing, str(missing))
-
-    # JS が触らなくてよいID（CSSセレクタや aria-labelledby の参照先）
-    ok_without_js = {"tmb-dlg-title", "tmb-draft-wrap"}
-    unused = sorted(ids - used - ok_without_js)
-    check("テンプレートに使われないIDが残っていない", not unused, str(unused))
-
-
-def test_no_share_tool(cl):
-    print("\n[9] シェアツール方式が撤去されているか")
-    js = open(os.path.join(os.path.dirname(__file__), "..", "app", "templates",
-                           "_scripts.html"), encoding="utf-8").read()
-    for dead in ("tmbOpenShareTool", "tmbSendAll", "/api/share/prepare",
-                 "widgets/share/tool", "tmbApiMode"):
-        check(f"JSに {dead} が残っていない", dead not in js)
-
-    for path in ("/api/share/prepare", "/share/abc", "/share-img/abc/0"):
-        r = cl.get(path)
-        check(f"{path} が 404", r.status_code == 404, str(r.status_code))
-
-    import db
-    conn = db.connect()
-    n = conn.execute("SELECT COUNT(*) c FROM sqlite_master "
-                     "WHERE type='table' AND name='share_tokens'").fetchone()["c"]
-    conn.close()
-    check("share_tokens テーブルが無い", n == 0, str(n))
-
-
-def test_disabled(tmp):
-    print("\n[10] 未設定なら機能まるごと無効")
-    db, web, cache = build_env(tmp, key="", secret="", accounts=False)
-    seed(db, cache)
-    cl = web.app.test_client()
-
-    d = cl.get("/api/tumblr/accounts").get_json()
-    check("enabled=False", d.get("enabled") is False, str(d))
-    check("投稿は400で断る",
-          cl.post("/api/tumblr/post", json={"shortcode": "LOCAL1"}).status_code == 400)
-
-    h = cl.get("/").get_data(as_text=True)
-    check("t ボタンが出ない", 'onclick="openTumblrShare' not in h)
-    check("モーダルも出ない", 'id="tmb-dlg"' not in h)
-    check("本体は普通に見える", cl.get("/").status_code == 200)
+def test_public_host_guard():
+    print("\n[8] 公開ホスト名で来たら全部404（撤去の保険）")
+    import importlib
+    os.environ["IG_RAY_PUBLIC_SHARE_HOST"] = "share.example.com"
+    import config
+    import web as web_mod
+    importlib.reload(config)
+    web = importlib.reload(web_mod)
+    web.app.config["TESTING"] = True
+    try:
+        with web.app.test_client() as cli:
+            for path in ("/", "/gallery", "/backup", "/api/tumblr/accounts"):
+                r = cli.get(path, headers={"Host": "share.example.com"})
+                check(f"公開ホストの {path} は 404",
+                      r.status_code == 404, str(r.status_code))
+            r = cli.get("/", headers={"Host": "localhost"})
+            check("内部ホストなら通る", r.status_code == 200, str(r.status_code))
+    finally:
+        os.environ.pop("IG_RAY_PUBLIC_SHARE_HOST", None)
+        importlib.reload(config)
+        importlib.reload(web_mod)
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="igray_tmbweb_")
-    print(f"test dir: {tmp}")
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "t.db")
+    cache = os.path.join(tmp, "cache")
+    os.makedirs(cache, exist_ok=True)
+    os.environ["IG_RAY_DB"] = path
+    os.environ["IG_RAY_CACHE"] = cache
+    os.environ.pop("IG_RAY_PUBLIC_SHARE_HOST", None)
+    os.environ.pop("TUMBLR_CONSUMER_KEY", None)
+    os.environ.pop("TUMBLR_CONSUMER_SECRET", None)
 
-    srv, hits = start_mock()
-    db, web, cache = build_env(tmp)
-    seed(db, cache)
-    import tumblr_client
-    tumblr_client.API_BASE = f"http://127.0.0.1:{srv.server_port}/v2"
-    cl = web.app.test_client()
+    test_legacy_gone()
+    test_id_crosscheck()
+    test_new_behaviour()
 
-    test_accounts(cl)
-    test_post(cl, hits)
-    test_indices(cl, hits)
-    test_state(cl, hits)
-    test_errors(cl)
-    test_buttons(cl)
-    test_macro_with_context()
-    test_modal_ids(cl)
-    test_no_share_tool(cl)
-    srv.shutdown()
+    c = build_db(path)
+    import web
+    web.app.config["TESTING"] = True
+    web._target_cache.update({"at": 0.0, "set": None})
+    web._muted_cache.update({"at": 0.0, "set": frozenset()})
+    with web.app.test_client() as cli:
+        test_routes(cli)
+    test_enabled_flags()
+    c.close()
+    test_public_host_guard()
 
-    test_disabled(tempfile.mkdtemp(prefix="igray_tmbweb_off_"))
-
-    print(f"\n{'=' * 50}")
+    print("\n" + "=" * 50)
     print(f"PASS {len(PASS)} / FAIL {len(FAIL)}")
-    if FAIL:
-        for f in FAIL:
-            print(f"  - {f}")
-        return 1
-    print("すべて通過")
-    return 0
+    for n in FAIL:
+        print(f"  - {n}")
+    return 1 if FAIL else 0
 
 
 if __name__ == "__main__":

@@ -40,9 +40,9 @@ dev/backup_page_check.py  バックアップ状況画面のテスト（コンテ
 dev/video_check.py        GraphVideo 取り扱いのテスト（コンテナ非同梱）
 dev/rename_db.py          DBファイル名の移行ヘルパ（コンテナ非同梱）
 dev/privacy_check.py      公開ファイルへの環境固有情報の混入検査（コンテナ非同梱）
-dev/css_check.py          CSS変数の未定義・半透明の検出（コンテナ非同梱）
+dev/tumblr_web_check.py   Tumblr投稿の表示層テスト（コンテナ非同梱）
 dev/tumblr_check.py       Tumblr APIクライアントのテスト（コンテナ非同梱）
-dev/tumblr_web_check.py   Tumblr投稿のエンドポイント・UIのテスト（コンテナ非同梱）
+dev/target_check.py       監視対象フィルタのテスト（コンテナ非同梱）
 deploy/                   外部公開の設定例（Cloudflare Tunnel）
 NOTES.example.md          作業メモの雛形（実物 NOTES.md は .gitignore 済み）
 dev/lightbox_check.js     ライトボックスのキー操作テスト（jsdom・コンテナ非同梱）
@@ -53,27 +53,27 @@ zip は X-Ray と同じく**サブフォルダ無しで直下展開**。
 ## 動作確認（ログイン不要）
 
 ```bash
-python3 dev/mock_check.py        # 59項目
+python3 dev/mock_check.py        # 60項目
 python3 dev/ratelimit_check.py   # 23項目
 python3 dev/loader_check.py      # 20項目
 python3 dev/accounts_check.py    # 35項目
-python3 dev/fallback_check.py    # 135項目
+python3 dev/fallback_check.py    # 137項目
 python3 dev/route_check.py       # 113項目
-python3 dev/css_check.py         # 17項目（CSS変数の未定義検出）
 python3 dev/migration_check.py   # 21項目
 python3 dev/egress_check.py      # 37項目
 python3 dev/purge_check.py       # 39項目
-python3 dev/video_check.py       # 34項目
+python3 dev/video_check.py       # 36項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 50項目
+python3 dev/target_check.py      # 57項目
 python3 dev/tumblr_check.py      # 58項目
-python3 dev/tumblr_web_check.py  # 51項目
+python3 dev/tumblr_web_check.py  # 74項目
 python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
 
-npm i -D jsdom && node dev/lightbox_check.js   # 105項目
+npm i -D jsdom && node dev/lightbox_check.js   # 82項目
 ```
 
-計 871 項目通過。前者が extract_media / post_to_record / save_posts /
+計 880 項目通過。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -152,9 +152,93 @@ API は `muted` を明示指定でき、冪等です。省略時のみトグル�
 ```bash
 docker compose run --rm accounts add minamina_flyover
 docker compose run --rm accounts add https://www.instagram.com/someone/   # URLでも可
-docker compose run --rm accounts list
-docker compose run --rm accounts disable someone   # 巡回から外す（データは残る）
+docker compose run --rm accounts list              # 既定は監視対象のみ
+docker compose run --rm accounts list --all        # 自動でできた行も含める
+docker compose run --rm accounts disable someone   # 巡回から外す（表示は残る）
 ```
+
+### 監視対象と「自動でできた行」を分ける（`is_target`）
+
+共同投稿では `owner_username` が相手側になる（`coauthor_producers`）。
+投稿データからアイコンと表示名が取れるので、スクレイパはその相手の
+`accounts` 行を `merge_account()` で作る。
+
+**v4.16 より前はここが `is_enabled` の列既定（=1）に落ちていて、
+自動でできた行がそのまま巡回対象に混ざっていた。**
+巡回するほど知らないアカウントが増え、フィードとギャラリーが埋まっていく。
+
+そこで「意図して登録した対象か」を `accounts.is_target` で持つようにした。
+
+| | `is_target` | `is_enabled` | 巡回 | 表示 |
+|---|---|---|---|---|
+| `add` / `target` で登録 | 1 | 1 | する | する |
+| `disable` | 1 | 0 | しない | **する** |
+| `mute` | 1 | – | しない | しない |
+| 共同投稿などで自動生成 | **0** | 0 | しない | **しない** |
+
+`is_target` と `is_enabled` を分けてあるのは、**「一時的に取得を止めた対象」と
+「そもそも対象ではないもの」は別物**だから。`disable` した対象の過去の投稿は
+引き続き見たい。
+
+```bash
+docker compose run --rm accounts targets           # 監視対象の一覧
+docker compose run --rm accounts strays            # 対象外なのに投稿があるものを一覧
+docker compose run --rm accounts target someone    # 対象に昇格（過去の投稿も出てくる）
+docker compose run --rm accounts untarget someone  # 対象から外す（データは残る）
+```
+
+#### Notion の台帳と一致させる
+
+`retarget` は**監視対象リストをファイルの内容で置き換える**。
+ファイルに無い対象は外れる（行と投稿は残る）。既定は差分表示のみ。
+
+```bash
+# 1行1ユーザー名、# 以降はコメント
+docker compose run --rm accounts retarget /data/targets.txt           # 差分を見る
+docker compose run --rm accounts retarget /data/targets.txt --apply   # 反映
+```
+
+空ファイルや存在しないファイルは**中止する**（全部外れる事故を防ぐため）。
+
+#### 既存DBのマイグレーション
+
+`is_target` 列の追加時、**`is_enabled = 1` の行をそのまま対象として引き継ぐ**。
+つまり移行直後は「いま巡回している集合」が変わらない。
+自動で混ざった行もそこに含まれているので、一度 `retarget` で台帳と合わせるのが早い。
+
+ここで自動判別しないのは、`scrape_log` を見ても
+「元から対象だった行」と「混ざったあと巡回されるようになった行」が区別できないため
+（混ざった行も cron で普通に巡回されてログが積まれている）。推測で絞ると対象が消える。
+
+棚卸しは名前を打ち直さずに往復できる:
+
+```bash
+# 1. いまの対象を書き出す
+docker compose run --rm accounts targets --plain > data/targets.txt
+
+# 2. エディタで開いて、見覚えのない名前の行を消す
+#    （消した分は監視対象から外れるだけで、投稿データは残る）
+vi data/targets.txt
+
+# 3. 差分を確認してから反映
+docker compose run --rm accounts retarget /data/targets.txt
+docker compose run --rm accounts retarget /data/targets.txt --apply
+```
+
+#### 表示側の扱い
+
+| 画面 | 監視対象外の投稿 |
+|---|---|
+| フィード `/` | 出ない（件数は「非表示 N件」として表示） |
+| ギャラリー `/gallery` | 出ない。プルダウンにも出ない |
+| ギャラリー `?user=名前` 指定 | **出る**（ブックマークからの導線を切らない） |
+| ユーザーページ `/user/名前` | **出る**。「監視対象外」の注記つき |
+| ブックマーク | **出る**（非正規化コピーなので） |
+| ミュート画面 | 対象外の一覧を別枠で出す |
+
+**監視対象が0件のときは絞り込まない。** 絞ると全投稿が消えて障害に見えるため。
+`db.target_usernames()` は列が無い旧DBでは `None` を返し、
+これも「絞り込みなし」として扱う。空集合と `None` の混同は全消えに直結する。
 
 ### 取得
 
@@ -683,27 +767,19 @@ instaloader の `NodeIterator` は `freeze()` / `thaw()` でページ送りの�
 
 ## Tumblr 投稿（任意）
 
-投稿カードの `t` ボタンから Tumblr に投稿する。**OAuth API 方式のみ。**
+投稿カードの `t` ボタンから Tumblr に投稿する。**2方式ある。**
 
-画像はこちらから送るので外部公開もトンネルも要らず、複数枚もそのまま投稿できる。
-`TUMBLR_CONSUMER_KEY` が未設定なら機能まるごと無効（`t` ボタンも出ない）。
+| | OAuth API 方式（推奨） | シェアツール方式（旧） |
+|---|---|---|
+| 外部公開 | **不要** | 必要（Tumblrが画像を取りに来る） |
+| 複数枚 | **可** | **不可**（2026-08にTumblr側が劣化） |
+| 投稿先の選択 | 可 | 不可 |
+| 下書き | 可 | 不可 |
+| 操作 | ボタン1発で完了 | Tumblrの投稿画面が開く |
+| 要るもの | アプリ登録のみ | ドメイン・cloudflared・常駐 |
 
-> 旧「シェアツール方式」（Tumblrのポップアップに一時公開URLを渡す）は撤去した。
-> Tumblr 側が複数枚の自動添付をやめたうえ、URL配信のために cloudflared と
-> ドメインが要るので、API方式に対して利点が無くなったため。
-> `share_tokens` テーブルは SCHEMA_VERSION 7 のマイグレーションで落としている。
-
-### モーダルの操作
-
-- **既定で全部の画像が選択される。** タップで外す／戻す
-- 「全選択」「1枚目だけ」のボタンで一括切り替え。選択枚数は常時表示
-- 最後の1枚は外せない（0枚では投稿できないため）
-- **3枚以上を選ぶと自動的に下書きになる**（`TMB_DRAFT_THRESHOLD`）。
-  枚数が多いほど公開前に見直したいため。注記が出て、外すこともできる。
-  **一度手で操作したら以降は自動判定が介入しない**
-  （勝手に戻すと「外したのにまた入る」体験になる）
-- キャプションの初期値は投稿者のアカウントID（編集も削除も可）
-- 投稿先セレクタは登録が2件以上のときだけ出る
+**`TUMBLR_CONSUMER_KEY` が設定されていれば API 方式を使う。**
+未設定ならシェアツール方式にフォールバックする（`_inject_share_flags()`）。
 
 ### OAuth API 方式のセットアップ
 
@@ -790,6 +866,46 @@ ig-ray の `local_path` は `/data/cache/AB/XXX_0.jpg` のようにサブディ�
 - Consumer Secret を人に見せない（スクショにも写さない）。
   再生成はできるが**再認可が必要**になる
 
+### 旧シェアツール方式は撤去した（v4.16）
+
+Tumblr の[シェアツール](https://help.tumblr.com/knowledge-base/share-button-documentation/)
+に URL パラメータで画像URLを渡す方式を併存させていたが、削除した。
+
+**`content` の画像URLは Tumblr のサーバー側から取得される**ため、
+トークン付きの一時公開URLを自前で配信する必要があった
+（`PUBLIC_SHARE_BASE_URL` / cloudflared / `/share` 系エンドポイント / `share_tokens`）。
+
+そして **2026-08 時点で複数枚の自動添付が効かない。**
+`content` にカンマ区切りで複数枚渡すのが仕様だが、現在の Tumblr は
+複数枚だとフェッチ自体をせず空の投稿画面になる（1枚なら今も自動添付される。
+tcpdump で実測確認）。配信側・Cloudflare・URLパラメータはすべて検証して無罪。
+
+API方式ならローカルファイルを `data[0]`, `data[1]`, … で直接アップロードするので
+この制約が無い。1枚しか添付できない経路を残す理由がないため、以下をすべて削除した。
+
+| 消したもの | |
+|---|---|
+| `/api/share/prepare` / `/share/<token>` / `/share-img/<token>/<n>` | ルート |
+| `share_tokens` テーブル | マイグレーションで `DROP`（schema v7） |
+| `app/templates/share.html` | OGPプレビュー |
+| `IG_RAY_PUBLIC_SHARE_BASE_URL` / `IG_RAY_SHARE_TOKEN_TTL_MIN` | 環境変数 |
+| 「全枚数を渡す（実験）」トグル | モーダル |
+
+**`IG_RAY_PUBLIC_SHARE_HOST` だけは撤去の保険として残してある。**
+設定されていると、そのホスト名で来たリクエストを**すべて404にする**
+（以前は `/share` 系だけ通していた）。cloudflared と DNS を落とすまでの間、
+ingress の設定ミスで管理画面が外に出るのを防ぐ。落とし終わったら消してよい。
+
+### 画像選択と自動下書き（v4.16）
+
+- **既定は全選択。** タップは「外す/戻す」。`tmbChosen` が空の集合なら「全部」を
+  意味し、最初のタップで実体化する。全部外すことはできない
+- 「全部選ぶ」「1枚目だけ」ボタンで一括操作できる
+- **3枚以上を選ぶと自動で「下書き」にチェックが入る**（`TMB_DRAFT_THRESHOLD = 3`）。
+  枚数が多いほど投稿前に確認したいため。チェックを手で触ったあとは自動で
+  書き換えない（`tmbDraftManual`）
+- 絞ったときだけ `indices` を送る。全選択なら送らない（サーバ側の既定が全部）
+
 ### 移植時に踏んだ罠
 
 **Jinja のマクロは呼び出し元のコンテキストを引き継がない。**
@@ -812,31 +928,22 @@ html.count('onclick="openTumblrShare')   # 共有可能な投稿の数だけあ�
 **`<script>` 内に Jinja タグを書くと `dev/lightbox_check.js` が落ちる**
 （eval が `Unexpected token '%'`）。JSは常に定義し、出し分けはHTML側だけにする。
 
-**HTMLだけ直してJSを追随させないと、モーダルが開かなくなる。**
-`getElementById('...').style` が `null` になって TypeError で止まり、
-`.open` クラスが付く前に関数が死ぬ（2026-09に実際に起きた）。
-`dev/tumblr_web_check.py` の [8] が、JSが触るIDとテンプレートのIDを
-**両方向で突き合わせて**検出する。
+**HTML と JS の ID がずれると `openTumblrShare` が丸ごと落ちる。**
+v4.15 で「バックエンドとHTMLは直したがJSが古い」状態を出荷し、
+存在しない要素の `.style` を触って TypeError で何も開かなくなった。対策は2つ:
 
-## CSS変数の注意
+- 任意要素は `tmbEl()` / `tmbShow()` 経由にして、無くても落ちないようにする
+- `dev/tumblr_web_check.py` が ID を**両方向**で突き合わせる
+  （JSが触る ID が HTML にあるか／HTML の ID がJSから使われているか）。
+  片方向だけでは「消し忘れた markup」も「古いJS」も拾えない
 
-**未定義のCSS変数を使うと、その宣言ごと無効になる。**
-ブラウザは黙って無視するのでエラーも出ない。
+**テンプレートを変えたら Ctrl+Shift+R（ハードリロード）。**
+通常のリロードではブラウザのキャッシュが効いて、直したのに直らない。
 
-`_style.html` が `--bg` と `--surface` しか定義していないのに、
-ダイアログ・カード・ボタンの9箇所が `--bg-card` を参照していて、
-**モーダルの背景が塗られず後ろが透けていた**（2026-09に発覚）。
-`--bg-card` を両テーマに定義して解消。
-
-`dev/css_check.py` が以下を機械的に検出する。
-
-- 未定義の変数の参照（`var(--x, フォールバック)` 付きは許可）
-- ライト／ダークで片方にしか定義がない変数
-- 重ねて表示する面（`--bg-card` / `--bg` / `--surface`）が半透明になっていないか
-- `.dlg` の背景指定と `.dlg-wrap` の暗幕、モーダルの重ね順
-
-**重ねる面の色は必ず不透明にすること。** 半透明にすると後ろが透ける。
-暗幕（`.dlg-wrap`）とオーバーレイは半透明でよい。
+**CSS カスタムプロパティが未定義だと、その宣言ごと無効になる。**
+`--bg-card` を定義せずに `background: var(--bg-card)` と書いていたため、
+モーダルが透過して背後の投稿が透けていた（v4.14）。エラーは一切出ない。
+`dev/tumblr_web_check.py` が「使っている変数がすべて定義されているか」を検査する。
 
 ## 既知の未確認事項
 
@@ -850,6 +957,17 @@ html.count('onclick="openTumblrShare')   # 共有可能な投稿の数だけあ�
 
   ※ `from_shortcode` は `get_posts()` とは別エンドポイントなので、
   429 のリスクは別途ある。cron が回っていない時間帯に1回だけ叩くこと。
+
+- **Tumblr API の実投稿がまだ未検証。** モックでは通っている。
+  **最初は必ず「下書きとして投稿する」にチェックを入れて試す。**
+  公開で失敗すると取り消しの手間がかかる
+- **監視対象の実データでの棚卸しがまだ。** マイグレーションは
+  `is_enabled = 1` をそのまま引き継ぐので、混ざった行も対象に残っている。
+  `accounts strays` で件数を見てから `retarget` で台帳と合わせる
+- **cloudflared と `share-ig-ray` の DNS がまだ生きている。**
+  旧シェアツール方式を撤去したので、もう不要。
+  落とすまでは `IG_RAY_PUBLIC_SHARE_HOST` を設定しておけば全404になる
+- **バックフィル対象の追加がCLIのみ。** web画面からは積めない
 
 ## 公開ファイルと作業メモの分離
 

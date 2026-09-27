@@ -35,6 +35,11 @@ def build_db(path, cache_dir):
     })
     # degraded 運用のアカウント（username だけ）
     db.ensure_account(c, "bare_user")
+    # v4.16: 監視対象フラグを立てないと表示層で除外される。
+    # 本番と同じ状態にしておく（対象0件だとフィルタ自体が無効になるため、
+    # ここを忘れると「通っているのに何も検査していない」状態になる）。
+    db.set_target(c, "full_user", True)
+    db.set_target(c, "bare_user", True)
 
     def media(n, video=False):
         return json.dumps([

@@ -20,7 +20,7 @@ import config
 
 DB_PATH = config.db_path()
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 # --------------------------------------------------------------------------
@@ -85,6 +85,11 @@ DDL = [
         mediacount      INTEGER,
         categories_json TEXT,
         is_enabled      INTEGER NOT NULL DEFAULT 1,
+        -- 「自分が意図して登録した監視対象か」。
+        -- 共同投稿の相手（coauthor_producers）は投稿データから拾って
+        -- accounts に行ができるが、それは監視対象ではない。
+        -- **既定は 0**。1 になるのは seed_accounts の add / target のみ。
+        is_target       INTEGER NOT NULL DEFAULT 0,
         is_muted        INTEGER NOT NULL DEFAULT 0,
         muted_at        TEXT,
         mute_reason     TEXT,
@@ -172,6 +177,7 @@ DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_log_user_time ON scrape_log(username, ended_at DESC)",
 
+
     # 全件バックフィル（丸ごとバックアップ）のジョブ管理
     #
     # resume_json は instaloader の FrozenNodeIterator を JSON 化したもの。
@@ -236,6 +242,24 @@ def init_db(conn=None, db_path=None):
         _add_column_if_missing(conn, "accounts", "muted_at", "TEXT")
         _add_column_if_missing(conn, "accounts", "mute_reason", "TEXT")
 
+        # --- schema v8: 監視対象フラグ -----------------------------------
+        # 共同投稿の相手は merge_account で accounts に行ができる。
+        # is_enabled が列既定の 1 だったので、**自動でできた行が巡回対象に
+        # 混ざっていた**（謎アカウントが増え続ける原因）。
+        #
+        # 既存DBでは「いま巡回している集合」をそのまま引き継ぐ
+        # （is_enabled=1 → is_target=1）。ここで勝手に絞ると巡回対象が
+        # 消えるので、整理は seed_accounts.py retarget で本人にやってもらう。
+        if _add_column_if_missing(conn, "accounts", "is_target",
+                                  "INTEGER NOT NULL DEFAULT 0"):
+            conn.execute(
+                "UPDATE accounts SET is_target = 1 WHERE is_enabled = 1")
+
+        # --- schema v7: share_tokens 廃止 -------------------------------
+        # Tumblr 投稿は API 直叩きのみになったので一時公開URLは不要。
+        # テーブルごと落とす（トークンは実質的な公開URLなので残さない）。
+        conn.execute("DROP TABLE IF EXISTS share_tokens")
+
         for col, decl in [
             ("owner_username", "TEXT"), ("caption", "TEXT"), ("date_utc", "TEXT"),
             ("likes", "INTEGER"), ("comments", "INTEGER"), ("typename", "TEXT"),
@@ -244,10 +268,6 @@ def init_db(conn=None, db_path=None):
             ("media_json", "TEXT"), ("local_media_json", "TEXT"),
         ]:
             _add_column_if_missing(conn, "bookmarks", col, decl)
-
-        # v7: シェアツール方式の撤去にともない share_tokens を落とす。
-        # 中身は有効期限60分の一時トークンだけなので、消えて困るものは無い。
-        conn.execute("DROP TABLE IF EXISTS share_tokens")
 
         # --- 新しい列に張るインデックスはマイグレーションの「後」で ---
         # DDL リストに入れると、既存DBでは列が追加される前に走って
@@ -314,9 +334,10 @@ def merge_account(conn, row):
     conn.execute(
         """
         INSERT INTO accounts
-            (username, userid, full_name, profile_pic_url, profile_pic_local, updated_at)
+            (username, userid, full_name, profile_pic_url, profile_pic_local,
+             is_enabled, is_target, updated_at)
         VALUES (:username, :userid, :full_name, :profile_pic_url, :profile_pic_local,
-                datetime('now'))
+                0, 0, datetime('now'))
         ON CONFLICT(username) DO UPDATE SET
             userid            = COALESCE(excluded.userid, accounts.userid),
             full_name         = COALESCE(excluded.full_name, accounts.full_name),
@@ -342,7 +363,7 @@ def ensure_account(conn, username):
     web_profile_info が 429 でプロフィール詳細を取れないときに使う。
     """
     conn.execute(
-        "INSERT INTO accounts (username) VALUES (?) "
+        "INSERT INTO accounts (username, is_enabled, is_target) VALUES (?, 0, 0) "
         "ON CONFLICT(username) DO NOTHING",
         (username,),
     )
@@ -507,12 +528,100 @@ def log_scrape(conn, username, status, fetched=0, inserted=0,
 # --------------------------------------------------------------------------
 
 def enabled_accounts(conn):
-    """巡回対象。ミュート中のアカウントは除く。"""
+    """
+    巡回対象。ミュート中のアカウントは除く。
+
+    is_target を見るのは、共同投稿の相手が merge_account で作った行が
+    巡回対象に混ざるのを防ぐため（v4.16 より前は混ざっていた）。
+    """
     return [r["username"] for r in conn.execute(
         "SELECT username FROM accounts "
-        "WHERE is_enabled = 1 AND COALESCE(is_muted, 0) = 0 "
+        "WHERE is_enabled = 1 AND COALESCE(is_target, 0) = 1 "
+        "  AND COALESCE(is_muted, 0) = 0 "
         "ORDER BY username"
     )]
+
+
+def target_usernames(conn):
+    """
+    監視対象のユーザー名の集合。**表示のフィルタに使う。**
+
+    is_enabled は見ない。巡回を一時停止（disable）しているだけの対象は
+    引き続き表示したいので、「対象かどうか」と「取りに行くかどうか」を分ける。
+    ミュートは別軸（取得も表示もしない）なのでここでは除かない。
+    """
+    try:
+        return {r["username"] for r in conn.execute(
+            "SELECT username FROM accounts WHERE COALESCE(is_target, 0) = 1")}
+    except Exception:
+        # 列が無い（マイグレーション前）＝従来動作にフォールバックする。
+        # ここで空集合を返すと全投稿が消えるので絶対にやらない。
+        return None
+
+
+def is_target(conn, username):
+    row = conn.execute(
+        "SELECT COALESCE(is_target, 0) AS t FROM accounts WHERE username = ?",
+        ((username or "").lower(),)).fetchone()
+    return bool(row and row["t"])
+
+
+def set_target(conn, username, target, also_enable=True):
+    """
+    監視対象フラグの切り替え。未登録なら行を作る。
+
+    対象にするときは is_enabled も一緒に立てる（対象なのに取りに行かない、
+    という分かりにくい状態を既定で作らないため）。
+    """
+    username = (username or "").strip().lower()
+    if not username:
+        return False
+    conn.execute(
+        "INSERT INTO accounts (username, is_enabled, is_target) VALUES (?, 0, 0) "
+        "ON CONFLICT(username) DO NOTHING",
+        (username,),
+    )
+    if target:
+        conn.execute(
+            "UPDATE accounts SET is_target = 1"
+            + (", is_enabled = 1" if also_enable else "")
+            + " WHERE username = ?", (username,))
+    else:
+        # 対象から外したら巡回もしない。行とデータは残す。
+        conn.execute(
+            "UPDATE accounts SET is_target = 0, is_enabled = 0 WHERE username = ?",
+            (username,))
+    return True
+
+
+def target_accounts(conn):
+    """監視対象の一覧（表示・CLI用）。投稿数を添える。"""
+    return [dict(r) for r in conn.execute("""
+        SELECT a.username, a.is_enabled, COALESCE(a.is_muted, 0) AS is_muted,
+               a.full_name, a.note, a.added_at,
+               (SELECT COUNT(*) FROM posts p
+                 WHERE p.owner_username = a.username) AS n_posts
+        FROM accounts a
+        WHERE COALESCE(a.is_target, 0) = 1
+        ORDER BY a.username
+    """)]
+
+
+def stray_accounts(conn):
+    """
+    監視対象ではないのに投稿が入っているアカウント。
+
+    共同投稿の相手・関連投稿の出どころがここに出る。
+    「表示されない投稿がどれだけあるか」を見せるために使う。
+    """
+    return [dict(r) for r in conn.execute("""
+        SELECT a.username, COALESCE(a.is_muted, 0) AS is_muted, a.full_name,
+               (SELECT COUNT(*) FROM posts p
+                 WHERE p.owner_username = a.username) AS n_posts
+        FROM accounts a
+        WHERE COALESCE(a.is_target, 0) = 0
+        ORDER BY n_posts DESC, a.username
+    """)]
 
 
 def muted_usernames(conn):
@@ -533,7 +642,8 @@ def set_mute(conn, username, muted, reason=None):
     if not username:
         return False
     conn.execute(
-        "INSERT INTO accounts (username) VALUES (?) ON CONFLICT(username) DO NOTHING",
+        "INSERT INTO accounts (username, is_enabled, is_target) VALUES (?, 0, 0) "
+        "ON CONFLICT(username) DO NOTHING",
         (username,),
     )
     conn.execute(

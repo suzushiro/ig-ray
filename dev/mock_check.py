@@ -286,6 +286,10 @@ def test_accounts_and_log(dbfile):
     check("行は増えない",
           conn.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"] == 1)
 
+    # v4.16: is_target を立てないと巡回対象にならない
+    check("is_target を立てる前は巡回対象外",
+          db.enabled_accounts(conn) == [], str(db.enabled_accounts(conn)))
+    db.set_target(conn, "target_user", True)
     check("enabled_accounts が返す", db.enabled_accounts(conn) == ["target_user"])
 
     db.log_scrape(conn, "target_user", "ok", 12, 3)

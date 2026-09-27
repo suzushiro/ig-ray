@@ -8,9 +8,9 @@
     --text-dim: #536471;
     --accent: #1d9bf0;
     --video-overlay: rgba(0,0,0,0.35);
-    /* カード・ダイアログ・ボタンの地の色。
-       **必ず不透明にすること。** 未定義や半透明だと background 宣言ごと
-       無効になり、モーダルの背後が透けて読めなくなる。 */
+    /* モーダルやボタンの「面」の色。
+       **定義を忘れると var(--bg-card) を使った background 宣言そのものが
+       無効になり、ダイアログが透過する**（v4.14 で踏んだ）。 */
     --bg-card: #ffffff;
 }
 [data-theme="dark"] {
@@ -448,19 +448,17 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .tmb-preview img.selected {
     opacity: 1; border-color: var(--accent, #1d9bf0);
 }
-/* 全枚数モードでは1枚選択が無意味なので、選択の見た目を消す */
-/* 選択バー：枚数表示と「全選択 / 1枚目だけ」 */
-.tmb-select-bar {
-    display: flex; align-items: center; gap: 8px;
-    margin: 0 0 6px; font-size: 11px; color: var(--text-dim);
+/* 選択の一括操作バー。複数枚のときだけ出す */
+.tmb-sel-bar {
+    display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+    font-size: 11px; color: var(--text-dim);
 }
-.tmb-select-bar #tmb-count { font-variant-numeric: tabular-nums; }
-.tmb-mini {
-    padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer;
-    border: 1px solid var(--border); background: var(--surface);
-    color: var(--text-dim); font-family: inherit;
+.tmb-sel-btn {
+    padding: 3px 9px; border-radius: 999px; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
 }
-.tmb-mini:hover { background: var(--surface-hover); color: var(--text); }
+.tmb-sel-btn:hover { background: var(--surface-hover); }
+.tmb-sel-count { margin-left: auto; }
 .tmb-check {
     display: flex; align-items: center; gap: 6px; margin: 2px 0 6px;
     font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;

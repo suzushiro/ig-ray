@@ -28,6 +28,15 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
+# **import より前にキャッシュ先をテンポラリへ逃がす。**
+# ig_scraper は CACHE_DIR を import 時に確定するので、あとで環境変数を
+# 変えても間に合わない。これを忘れると本物の /data/cache に書き込み、
+# 2回目の実行は os.path.exists の短絡でダウンロードを検査できなくなる
+# （実際に「2回目以降だけ落ちるテスト」になっていた）。
+_TMP_CACHE = tempfile.mkdtemp(prefix="igray_video_cache_")
+os.environ["IG_RAY_CACHE"] = _TMP_CACHE
+os.environ["IG_RAY_DB"] = os.path.join(_TMP_CACHE, "test.db")
+
 import db                      # noqa: E402
 import ig_scraper as igs       # noqa: E402
 
@@ -303,6 +312,13 @@ def main():
     test_owner_from_node_video()
     test_download_ext(dbfile)
     test_sidecar_with_video()
+
+    print("\n[7] テスト自身が本物のキャッシュを汚さない")
+    import ig_scraper as igs
+    check("CACHE_DIR がテンポラリを指している",
+          igs.CACHE_DIR == _TMP_CACHE, igs.CACHE_DIR)
+    check("/data/cache を使っていない", not igs.CACHE_DIR.startswith("/data"),
+          igs.CACHE_DIR)
 
     print(f"\n{'=' * 50}")
     print(f"PASS {len(PASS)} / FAIL {len(FAIL)}")

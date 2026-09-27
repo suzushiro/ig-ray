@@ -34,13 +34,14 @@ CACHE_DIR = config.env("CACHE", "/data/cache")
 PER_PAGE = 60
 
 # --- Tumblr 投稿 --------------------------------------------------------
-# **OAuth API 方式のみ。** 画像はこちらからアップロードするので、
-# 外部公開URL・Cloudflare Tunnel・一時トークンは要らない。
+# v4.16 以降は **OAuth API 直叩きのみ**。
+# 旧方式（Tumblr のシェアツールに一時公開URLを渡す）は、Tumblr 側が
+# 複数枚の取り込みをやめたため成立しなくなった。公開URL・トンネル・
+# 一時トークンはすべて不要になったので撤去した。
 #
-# 旧「シェアツール方式」（Tumblr が画像URLを取りに来る）は v4.15 で撤去した。
-# 2026-08 に Tumblr 側が複数枚の自動添付をやめて1枚しか載らなくなり、
-# API 方式なら制約なく投稿できると確認できたため。
-# 復活させたくなったら v4.14 のタグを見ること。
+# PUBLIC_SHARE_HOST は**撤去の保険としてだけ**残してある。
+# トンネルがまだ生きていても、公開ホスト名で来たリクエストは全部404にする。
+PUBLIC_SHARE_HOST = (config.env("PUBLIC_SHARE_HOST", "") or "").split(":")[0].lower()
 
 app = Flask(__name__)
 
@@ -174,6 +175,9 @@ def avatar_map(c):
 _muted_cache = {"at": 0.0, "set": frozenset()}
 MUTED_TTL = 30
 
+_target_cache = {"at": 0.0, "set": None}
+TARGET_TTL = 30
+
 
 def muted_set(c, fresh=False):
     """ミュート中のアカウント名。カードごとに引くと重いので短時間キャッシュ。"""
@@ -183,6 +187,49 @@ def muted_set(c, fresh=False):
     s = frozenset(db.muted_usernames(c))
     _muted_cache.update({"at": now, "set": s})
     return s
+
+
+def target_set(c, fresh=False):
+    """
+    監視対象のユーザー名。**None は「絞り込みなし」**（列が無い旧DB）。
+
+    空集合と None を混同すると全投稿が消えるので、呼び出し側では
+    必ず `is None` で分岐する。
+    """
+    now = time.time()
+    if not fresh and now - _target_cache["at"] < TARGET_TTL:
+        return _target_cache["set"]
+    s = db.target_usernames(c)
+    if s is not None:
+        s = frozenset(s)
+    _target_cache.update({"at": now, "set": s})
+    return s
+
+
+def hidden_owner_sql(c, column="owner_username"):
+    """
+    「監視対象以外 ＋ ミュート」を除外する WHERE 断片を作る。
+
+    戻り値: (sql, params)。除外するものが無ければ ("", [])。
+
+    共同投稿では owner_username が相手側になる（coauthor_producers）ので、
+    監視対象で絞らないと登録していないアカウントの投稿が並ぶ。
+    """
+    clauses, params = [], []
+    targets = target_set(c)
+    if targets is not None:
+        if not targets:
+            # 監視対象が0件。絞ると全部消えて事故に見えるので絞らない。
+            pass
+        else:
+            clauses.append(
+                f"{column} IN ({','.join('?' * len(targets))})")
+            params.extend(sorted(targets))
+    muted = muted_set(c)
+    if muted:
+        clauses.append(f"{column} NOT IN ({','.join('?' * len(muted))})")
+        params.extend(sorted(muted))
+    return (" AND ".join(clauses), params)
 
 
 def format_post(c, d, bookmarked=None, media_from_bookmark=False):
@@ -264,15 +311,32 @@ def serve_cache(filename):
 # フィード
 # --------------------------------------------------------------------------
 
+@app.before_request
+def _restrict_public_host():
+    """
+    公開ホスト名で来たリクエストは**全部404にする**。
+
+    **これが最後の砦。** 外部公開が必要な機能はもう無いので、
+    公開ホスト経由で通すルートは1本も無い。トンネルの撤去が済むまでの間、
+    ingress の設定ミスで管理画面が外に出るのを防ぐ。
+    """
+    if not PUBLIC_SHARE_HOST:
+        return None
+    host = (request.host or "").split(":")[0].lower()
+    if host != PUBLIC_SHARE_HOST:
+        return None
+    abort(404)
+
+
 @app.context_processor
 def _inject_share_flags():
     """
     テンプレート全体から Tumblr 投稿の有効/無効を見えるようにする。
 
-    キーとアカウントが揃っていなければ `t` ボタン自体を出さない。
+    投稿経路は OAuth API のみ。キーと投稿先が揃っていなければ
+    `t` ボタンも出さない（押しても何もできないボタンは出さない）。
 
     **マクロは `with context` で import しないとこれが見えない。**
-    付け忘れるとボタンが一切描画されない（実際に踏んだ）。
     """
     tumblr_ok = tumblr_client.is_configured()
     return {"share_enabled": tumblr_ok, "tumblr_api_enabled": tumblr_ok}
@@ -388,25 +452,22 @@ def index():
     c = conn()
     marked = db.bookmarked_shortcodes(c)
 
-    # ミュート中のアカウントの投稿はフィードに出さない（データは消さない）
-    muted = muted_set(c)
-    if muted:
-        marks = ",".join("?" * len(muted))
-        rows = c.execute(
-            f"SELECT * FROM posts WHERE owner_username NOT IN ({marks}) "
-            "ORDER BY date_utc DESC LIMIT ? OFFSET ?",
-            list(muted) + [PER_PAGE + 1, offset],
-        ).fetchall()
-    else:
-        rows = c.execute(
-            "SELECT * FROM posts ORDER BY date_utc DESC LIMIT ? OFFSET ?",
-            (PER_PAGE + 1, offset),
-        ).fetchall()
+    # 監視対象以外（共同投稿の相手・関連投稿）とミュートはフィードに出さない。
+    # **データは消さない。** 後から対象に加えれば過去分も出てくる。
+    hide_sql, hide_params = hidden_owner_sql(c)
+    where = f"WHERE {hide_sql} " if hide_sql else ""
+    rows = c.execute(
+        f"SELECT * FROM posts {where}ORDER BY date_utc DESC LIMIT ? OFFSET ?",
+        hide_params + [PER_PAGE + 1, offset],
+    ).fetchall()
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
     posts = [format_post(c, r, marked) for r in rows]
 
-    total = c.execute("SELECT COUNT(*) AS n FROM posts").fetchone()["n"]
+    # 件数も画面と合わせる（総数だけ多いと「消えた」と誤解する）
+    total = c.execute(
+        f"SELECT COUNT(*) AS n FROM posts {where}", hide_params).fetchone()["n"]
+    hidden_total = c.execute("SELECT COUNT(*) AS n FROM posts").fetchone()["n"] - total
 
     last = c.execute(
         "SELECT ended_at FROM scrape_log ORDER BY id DESC LIMIT 1").fetchone()
@@ -440,6 +501,7 @@ def index():
 
     return render_template("index.html", posts=posts, next_url=next_url,
                            total=total, last_jst=last_jst, troubles=troubles,
+                           hidden_total=hidden_total,
                            page=page, has_next=has_next)
 
 
@@ -472,6 +534,9 @@ def user_profile(username):
     acc = dict(acc)
     acc["avatar"] = avatar_map(c).get(username)
     acc["is_muted"] = bool(acc.get("is_muted"))
+    # 監視対象外でもURL直打ち・ブックマークから来られるようにしておき、
+    # 画面側で「対象外」と分かるようにする（404 にするとリンクが切れる）。
+    acc["is_target"] = bool(acc.get("is_target"))
 
     where = ["owner_username = ?"]
     params = [username]
@@ -545,15 +610,14 @@ def gallery():
     where = ["media_json IS NOT NULL", "media_json != '[]'"]
     params = []
     if username:
+        # 個別に指定されたときは監視対象外でも見せる（ブックマークからの導線）。
         where.append("owner_username = ?")
         params.append(username)
     else:
-        # 個別に指定されたときは見せる。一覧では隠す。
-        muted = db.muted_usernames(c)
-        if muted:
-            where.append(
-                "owner_username NOT IN (%s)" % ",".join("?" * len(muted)))
-            params.extend(muted)
+        hide_sql, hide_params = hidden_owner_sql(c)
+        if hide_sql:
+            where.append(hide_sql)
+            params.extend(hide_params)
     where_sql = " AND ".join(where)
 
     rows = c.execute(
@@ -580,10 +644,15 @@ def gallery():
                 "date_utc": d["date_utc"] or "",
             })
 
-    all_muted = db.muted_usernames(c)
+    # プルダウンも監視対象だけにする。ここに謎アカウントが並ぶのが
+    # 「表示が多い」の実感につながっていた。
+    hide_sql, hide_params = hidden_owner_sql(c)
     users = [r["owner_username"] for r in c.execute(
-        "SELECT DISTINCT owner_username FROM posts ORDER BY owner_username")
-        if r["owner_username"] not in all_muted]
+        "SELECT DISTINCT owner_username FROM posts "
+        + (f"WHERE {hide_sql} " if hide_sql else "")
+        + "ORDER BY owner_username", hide_params)]
+    if username and username not in users:
+        users.append(username)   # いま見ている対象外アカウントは残す
 
     next_url = (url_for("gallery", page=page + 1,
                         **({"user": username} if username else {}))
@@ -790,15 +859,21 @@ def mutes():
         r["avatar"] = cache_url(r.get("profile_pic_local"))
 
     # ミュート候補（投稿があるアカウント）
-    muted_set = {r["username"] for r in rows}
+    muted_names = {r["username"] for r in rows}
+    targets = target_set(c)
     candidates = [
         {"username": x["owner_username"], "n_posts": x["n"]}
         for x in c.execute(
             "SELECT owner_username, COUNT(*) AS n FROM posts "
             "GROUP BY owner_username ORDER BY owner_username")
-        if x["owner_username"] not in muted_set
+        if x["owner_username"] not in muted_names
+        and (targets is None or x["owner_username"] in targets)
     ]
-    return render_template("mutes.html", muted=rows, candidates=candidates)
+    # 監視対象外の投稿はミュートしなくても出ない。件数だけ知らせる。
+    strays = [r for r in db.stray_accounts(c) if r["n_posts"]]
+    return render_template("mutes.html", muted=rows, candidates=candidates,
+                           strays=strays,
+                           stray_posts=sum(r["n_posts"] for r in strays))
 
 
 @app.route("/api/mute/toggle", methods=["POST"])

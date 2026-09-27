@@ -29,6 +29,13 @@
             {% endif %}
         </div>
     </div>
+    {% if not account.is_target and not account.is_muted %}
+    <div class="health health-warn" style="margin:8px 0">
+        このアカウントは監視対象外です（共同投稿の相手など、投稿データから自動で見つかった行）。
+        フィードとギャラリーには出ません。追いたい場合は
+        <code>seed_accounts.py target {{ account.username }}</code> で監視対象にできます。
+    </div>
+    {% endif %}
     {% if account.is_muted %}
     <div class="health health-warn" style="margin:8px 0">
         🔇 このアカウントはミュート中です。取得もフィード表示も行われません。

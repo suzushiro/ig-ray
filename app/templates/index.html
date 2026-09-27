@@ -20,6 +20,7 @@
         <h1>IG-Ray<span class="alpha">(α)</span></h1>
         <div class="meta">
             全{{ total }}件
+            {% if hidden_total %} ・ <span title="監視対象以外のアカウント（共同投稿の相手・関連投稿）とミュート分です。データは残っています。">非表示 {{ hidden_total }}件</span>{% endif %}
             {% if last_jst %} ・ 最終更新: {{ last_jst }}{% endif %}
         </div>
         {% if troubles %}

@@ -80,9 +80,33 @@
         </div>
     </div>
 
+    {% if strays %}
+    <div class="mute-card">
+        <h3 style="font-size:14px;margin-bottom:8px">監視対象外のアカウント</h3>
+        <div class="meta" style="margin-bottom:8px">
+            共同投稿の相手や関連投稿の出どころです。{{ strays|length }}アカウント /
+            {{ stray_posts }}投稿ぶんが、ミュートしなくてもフィード・ギャラリーに出ません。<br>
+            追いたくなったら <code>seed_accounts.py target 名前</code>、
+            投稿ごと消すなら <code>purge 名前</code>（ブックマークは残ります）。
+        </div>
+        {% for sa in strays[:30] %}
+        <div class="mute-row">
+            <div class="mute-av">{{ sa.username[:2] }}</div>
+            <div class="mute-name">
+                <a href="/user/{{ sa.username }}">{{ sa.username }}</a>
+                <div class="mute-sub">投稿 {{ sa.n_posts }}件{% if sa.is_muted %} ・ ミュート中{% endif %}</div>
+            </div>
+        </div>
+        {% endfor %}
+        {% if strays|length > 30 %}
+        <div class="meta">ほか {{ strays|length - 30 }} アカウント（`seed_accounts.py strays` で全件）</div>
+        {% endif %}
+    </div>
+    {% endif %}
+
     {% if candidates %}
     <div class="mute-card">
-        <h3 style="font-size:14px;margin-bottom:8px">投稿のあるアカウント</h3>
+        <h3 style="font-size:14px;margin-bottom:8px">投稿のある監視対象アカウント</h3>
         {% for cd in candidates %}
         <div class="mute-row" data-user="{{ cd.username }}">
             <div class="mute-av">{{ cd.username[:2] }}</div>

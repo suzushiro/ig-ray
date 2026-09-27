@@ -1,0 +1,30 @@
+# Cloudflare Tunnel の設定例（ig-ray の Tumblr 共有用）
+#
+#   sudo cp deploy/cloudflared-config.example.yml /etc/cloudflared/config.yml
+#
+# 実ドメインはここには書かない。/etc/cloudflared/config.yml と .env にだけ書く。
+# share.example.com は RFC 2606 の予約ドメイン。
+#
+# 公開するのは /share と /share-img だけ。
+# **スクレイパーの操作画面・バックアップ画面・ギャラリーは絶対に含めない。**
+
+tunnel: <トンネルのUUID>
+credentials-file: /etc/cloudflared/<トンネルのUUID>.json
+
+ingress:
+  # path は「1ルール1パターン」。
+  # ^/share(-img)?/.* のようにまとめて書くとマッチせず全部404になる。
+  - hostname: share-ig.example.com
+    path: /share/.*
+    service: http://localhost:8079
+
+  - hostname: share-ig.example.com
+    path: /share-img/.*
+    service: http://localhost:8079
+
+  # 同ホストのそれ以外は落とす
+  - hostname: share-ig.example.com
+    service: http_status:404
+
+  # 他ホストも落とす（catch-all は必須）
+  - service: http_status:404

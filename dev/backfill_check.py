@@ -94,9 +94,7 @@ def test_schema(dbfile):
 
     v = conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    # SCHEMA_VERSION を上げたらここも直す（定数を見るので追随漏れが起きない）
-    check(f"schema_version = {db.SCHEMA_VERSION}",
-          v["value"] == str(db.SCHEMA_VERSION), v["value"])
+    check(f"schema_version = {db.SCHEMA_VERSION}", v["value"] == str(db.SCHEMA_VERSION), v["value"])
     db.init_db(conn)
     check("init_db は冪等", True)
     conn.close()
@@ -127,8 +125,7 @@ def test_migration():
           conn.execute("SELECT COUNT(*) c FROM backfill_jobs").fetchone()["c"] == 0)
     v = conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    check(f"schema_version が {db.SCHEMA_VERSION} になる",
-          v["value"] == str(db.SCHEMA_VERSION), v["value"])
+    check(f"schema_version が {db.SCHEMA_VERSION} になる", v["value"] == str(db.SCHEMA_VERSION), v["value"])
     conn.close()
 
 

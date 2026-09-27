@@ -161,9 +161,16 @@ def test_ensure_account_does_not_clobber():
     n = conn.execute(
         "SELECT COUNT(*) c FROM accounts WHERE username='brand_new'").fetchone()["c"]
     check("未登録なら行が作られる", n == 1)
-    check("新規行の is_enabled は 1",
-          conn.execute("SELECT is_enabled FROM accounts WHERE username='brand_new'"
-                       ).fetchone()["is_enabled"] == 1)
+    # v4.16: 自動でできた行は**監視対象にしない**。
+    # 既定に頼っていたせいで共同投稿の相手が巡回対象に混ざっていた。
+    r = conn.execute(
+        "SELECT is_enabled, is_target FROM accounts WHERE username='brand_new'"
+    ).fetchone()
+    check("新規行の is_enabled は 0", r["is_enabled"] == 0, str(r["is_enabled"]))
+    check("新規行の is_target は 0", r["is_target"] == 0, str(r["is_target"]))
+    check("巡回対象に入らない",
+          "brand_new" not in db.enabled_accounts(conn),
+          str(db.enabled_accounts(conn)))
 
     conn.commit()
     conn.close()
@@ -887,6 +894,9 @@ def test_mute_helpers():
                              "biography": None, "profile_pic_url": None,
                              "followers": 10, "mediacount": 1})
     db.ensure_account(conn, "a2")
+    # ensure_account は監視対象にしないので、巡回対象にするには明示が要る
+    db.set_target(conn, "a1", True)
+    db.set_target(conn, "a2", True)
     conn.commit()
 
     check("初期は巡回対象",
