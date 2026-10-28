@@ -881,6 +881,9 @@ def main():
     ap.add_argument("--posts-only", action="store_true", default=None,
                     help="プロフィール取得を最初から試みない"
                          "（web_profile_info が恒常的に弾かれる環境向け）")
+    ap.add_argument("--skip-egress-check", action="store_true",
+                    help="スクレイプ前の出口IP照合を省略する"
+                         "（手で動かすとき意図的に無効化する用。cron では付けない）")
     ap.add_argument("--cron", action="store_true",
                     help="定期巡回から呼ばれていることを示す。"
                          "終了時に次回予定時刻を記録する（web画面の表示用）。"
@@ -896,6 +899,32 @@ def main():
             db.clear_next_run(conn, "scrape")
         except Exception:
             pass
+
+    # --- 出口IPの照合（ログインより先にやる） -------------------------
+    # 漏れている状態でログインセッションを使いたくないので make_loader の前。
+    # 回線側のIPが変わっただけなら続行し、プロキシを迂回していたら中止する。
+    if not args.skip_egress_check:
+        import check_egress
+        eg = check_egress.check_egress()
+        if eg["verdict"] not in check_egress.QUIET_VERDICTS:
+            print(f"[出口IP] {eg['reason']}")
+            try:
+                check_egress.log_egress(conn, eg)
+                conn.commit()
+            except Exception as e:
+                # 記録に失敗しても判定自体は尊重する
+                print(f"  [警告] 出口IPの記録に失敗: {e}", file=sys.stderr)
+        if not eg["ok"]:
+            # 中止しても cron は INTERVAL 後に再挑戦してほしいので
+            # 次回予定は必ず記録する（ここを飛ばすと「次回予定なし」になり、
+            # 止まっていることが画面から読めなくなる）
+            if args.cron:
+                try:
+                    db.set_next_run(conn, "scrape", CRON_INTERVAL)
+                except Exception:
+                    pass
+            conn.close()
+            return 2
 
     loader, err = make_loader(args.login_user, verify=not args.skip_verify)
     if loader is None:

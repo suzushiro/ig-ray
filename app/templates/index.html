@@ -23,6 +23,16 @@
             {% if hidden_total %} ・ <span title="監視対象以外のアカウント（共同投稿の相手・関連投稿）とミュート分です。データは残っています。">非表示 {{ hidden_total }}件</span>{% endif %}
             {% if last_jst %} ・ 最終更新: {{ last_jst }}{% endif %}
         </div>
+        {# 出口IPの判定。失敗の一覧とは別枠で出す。
+           ここを専用にしているのは、取得が止まった事実をログを掘らずに
+           読めるようにするため（X-Rayでは12日気づかなかった）。 #}
+        {% if egress_alert %}
+        <div class="health {{ 'health-error' if egress_alert.is_error else 'health-warn' }}">
+            {% if egress_alert.is_error %}🛑 出口IPの確認に失敗し、取得を中止しています:
+            {% else %}🌐 出口IP:{% endif %}
+            <span>{{ egress_alert.message }}</span>
+        </div>
+        {% endif %}
         {% if troubles %}
         <div class="health health-warn">
             ⚠️ 直近6時間の失敗:

@@ -67,11 +67,208 @@ def fetch(sess, url, label, results):
         results.append((label, None))
 
 
+# --------------------------------------------------------------------------
+# スクレイパーから呼ぶ判定
+#
+# **「回線のIPが変わっただけ」と「プロキシを迂回して漏れている」を区別する。**
+# 区別せずに不一致で止めると、住宅向け回線のIP変更で取得が黙って死ぬ
+# （X-Ray で12日止まり、ログファイルにしか出ていなかったので誰も気づかなかった）。
+#
+# 切り分けの原理: プロキシ経由で測った出口IPと、プロキシを明示的に外して
+# 測った出口IPを比べる。
+#   違う → プロキシは効いている（回線側のIPが変わっただけ）→ 続行
+#   同じ → プロキシを通っていない（分離が崩れた）→ 中止
+# --------------------------------------------------------------------------
+
+# スクレイプを続行してよい verdict。
+# ここに無いものは中止（判定できないケースは安全側に倒す）。
+CONTINUE_VERDICTS = ("match", "unchecked", "proxy_ip_changed")
+
+# scrape_log に記録しない verdict（正常なので6時間ごとに行を増やす意味がない）
+QUIET_VERDICTS = ("match", "unchecked")
+
+# scrape_log に入れる擬似アカウント名。
+# 実在しないユーザー名にしたいので前後にアンダースコアを置く
+# （IGのユーザー名は英数字・_・. なので `__egress__` は衝突しない）。
+EGRESS_LOG_NAME = "__egress__"
+
+
+def _fetch_global_ip(session=None, url=V4_URL, timeout=20):
+    """
+    出口のグローバルIPを1つ返す。取れなければ None。
+
+    session を渡さなければ環境変数のプロキシを見る普通のセッションを使う。
+    200 でもエラー本文が返ることがあるので、必ずIPの形か検証する。
+    """
+    import requests
+
+    sess = session if session is not None else requests.Session()
+    try:
+        r = sess.get(url, timeout=timeout)
+        body = (r.text or "").strip()
+        ipaddress.ip_address(body)       # IPの形でなければ ValueError
+        return body
+    except Exception:
+        return None
+
+
+def _direct_session():
+    """
+    **プロキシを一切通さない**セッション。
+
+    `trust_env = False` で環境変数（HTTPS_PROXY 等）を無視する。
+    それだけでは足りず、`IG_RAY_PROXY` で明示的に渡している分も
+    空の proxies で潰す必要がある（trust_env は環境変数しか見ない）。
+    """
+    import requests
+
+    sess = requests.Session()
+    sess.trust_env = False
+    sess.proxies = {}
+    return sess
+
+
+def _proxy_configured():
+    """プロキシが設定されているか。文字列をそのまま返す（表示に使う）。"""
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        v = os.environ.get(k)
+        if v:
+            return v
+    return config.env("PROXY", "") or ""
+
+
+def check_egress(expected=None):
+    """
+    スクレイプ前の出口IP照合。**戻り値は dict**。
+
+      ok        … スクレイプを続行してよいか
+      ip        … プロキシ経由で測った出口IP
+      direct_ip … プロキシを外して測った出口IP（測る必要が無ければ None）
+      expected  … 期待値
+      proxy     … 検出したプロキシ設定（空文字なら未設定）
+      verdict   … match / proxy_ip_changed / proxy_bypassed /
+                  no_proxy_configured / undetermined / unchecked / unreachable
+      reason    … 人間が読む1行。そのまま画面に出す
+
+    verdict を文字列で持たせているのは、呼び出し側が ok だけでなく
+    「なぜ ok なのか」で分岐できるようにするため（記録の有無に使う）。
+    """
+    expected = (expected if expected is not None
+                else config.env("EXPECT_EGRESS_IP", "")) or ""
+    expected = expected.strip()
+    proxy = _proxy_configured()
+
+    def out(verdict, reason, ip=None, direct_ip=None):
+        return {"ok": verdict in CONTINUE_VERDICTS, "ip": ip,
+                "direct_ip": direct_ip, "expected": expected,
+                "proxy": proxy, "verdict": verdict, "reason": reason}
+
+    # 期待値が無ければ照合しない。記録もしない。
+    if not expected:
+        return out("unchecked",
+                   "期待する出口IPが未設定のため照合しません"
+                   "（IG_RAY_EXPECT_EGRESS_IP）")
+
+    ip = _fetch_global_ip()
+    if ip is None:
+        # 出口IPが取れない＝ネットワークが怪しい。安全側に倒して中止する。
+        return out("unreachable",
+                   "出口IPを取得できませんでした。"
+                   "ネットワークかプロキシが不調の可能性があります")
+
+    if ip == expected:
+        return out("match", f"出口IPは期待どおり（{ip}）", ip=ip)
+
+    # --- ここから切り分け ---
+    if not proxy:
+        return out("no_proxy_configured",
+                   f"出口IPが期待値と違い（{ip} ≠ {expected}）、"
+                   "プロキシも設定されていません。"
+                   "分離されていないため中止します", ip=ip)
+
+    direct_ip = _fetch_global_ip(session=_direct_session())
+    if direct_ip is None:
+        # プロキシ無しで出られない（＝NW的にプロキシ必須の構成）とも取れるが、
+        # 迂回していないことを確認できていないので中止する。
+        return out("undetermined",
+                   f"出口IPが期待値と違います（{ip} ≠ {expected}）。"
+                   "プロキシを外した出口IPが取得できず、"
+                   "迂回していないか判定できないため中止します",
+                   ip=ip, direct_ip=None)
+
+    if direct_ip == ip:
+        return out("proxy_bypassed",
+                   f"プロキシを迂回しています（プロキシ経由 {ip} ＝ 直接 {direct_ip}）。"
+                   "出口の分離が崩れているため中止します",
+                   ip=ip, direct_ip=direct_ip)
+
+    return out("proxy_ip_changed",
+               f"プロキシは効いています（経由 {ip} ≠ 直接 {direct_ip}）が、"
+               f"期待値 {expected} と違います。"
+               f"回線側のIPが変わったものとして続行します。"
+               f"IG_RAY_EXPECT_EGRESS_IP を {ip} に更新してください",
+               ip=ip, direct_ip=direct_ip)
+
+
+def log_egress(conn, result):
+    """
+    判定結果を scrape_log に記録する。書いたら True。
+
+    **ログファイルだけでは気づけない。** X-Ray が12日止まったのは
+    中止の事実が /var/log にしか出ておらず、web画面にも
+    docker compose logs にも出ていなかったため。
+    """
+    if result.get("verdict") in QUIET_VERDICTS:
+        return False
+    status = "egress_warn" if result.get("ok") else "egress_error"
+    import db
+    db.log_scrape(conn, EGRESS_LOG_NAME, status, 0, 0, result.get("reason"))
+    return True
+
+
+def clear_egress_log(conn):
+    """
+    出口IPの記録を消す。`.env` を直したあとバナーを黙らせるために使う。
+    戻り値は消した行数。
+    """
+    cur = conn.execute("DELETE FROM scrape_log WHERE username = ?",
+                       (EGRESS_LOG_NAME,))
+    conn.commit()
+    return cur.rowcount
+
+
 def main():
     ap = argparse.ArgumentParser(description="出口IPの確認")
     ap.add_argument("--expect", default=config.env("EXPECT_EGRESS_IP"),
                     help="期待する出口IP。指定すると一致しない場合に非ゼロ終了")
+    ap.add_argument("--clear-log", action="store_true",
+                    help="scrape_log から出口IPの記録を消す"
+                         "（.env を直したあとweb画面のバナーを消すのに使う）")
+    ap.add_argument("--verdict", action="store_true",
+                    help="スクレイパーと同じ判定だけを実行して結果を出す")
+    ap.add_argument("--db", default=None)
     args = ap.parse_args()
+
+    # --clear-log は測定をせずに終わる（.env 修正直後に叩くため、
+    # まだ出口が直っていなくても使えるようにする）
+    if args.clear_log:
+        import db
+        conn = db.connect(args.db)
+        db.init_db(conn)
+        try:
+            n = clear_egress_log(conn)
+        finally:
+            conn.close()
+        print(f"出口IPの記録を {n} 件削除しました。"
+              if n else "削除する記録はありませんでした。")
+        return 0
+
+    if args.verdict:
+        res = check_egress(args.expect)
+        print(f"verdict: {res['verdict']}")
+        print(f"ok     : {res['ok']}")
+        print(f"reason : {res['reason']}")
+        return 0 if res["ok"] else 1
 
     show_env()
 

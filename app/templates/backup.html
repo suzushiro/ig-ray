@@ -35,6 +35,7 @@
 .pill.queued{background:var(--surface-hover)}
 .pill.paused{background:#8899a622}
 .pill.error,.pill.ratelimited{background:#e0245e22;color:#e0245e}
+.pill.warn{background:#f4212e1a;color:#f4212e}
 .bk-alert{font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:10px;
           background:#e0245e14;color:#e0245e;border:1px solid #e0245e33}
 .bk-ok{font-size:12px;color:var(--text-dim)}
@@ -81,9 +82,22 @@
                     <span class="pill {{ 'done' if st.startswith('ok') else st }}">{{ st }} {{ n }}</span>
                 {% else %}—{% endfor %}
                 </span></div>
+            {% if egress_state %}
+            {# 擬似アカウント名（__egress__）は出さず「出口IP」として見せる #}
+            <div class="bk-row"><span class="label">🌐 出口IP</span>
+                <span class="value">
+                <span class="pill {{ 'error' if egress_state.is_error else 'warn' }}">{{
+                    '中止' if egress_state.is_error else '警告' }}</span>
+                </span></div>
+            <div class="bk-sub">{{ egress_state.message }}</div>
+            {% endif %}
         </div>
         <div class="bk-sub" style="margin-top:8px">
             <code>ok_degraded</code> が正常です（プロフィール詳細は取らず投稿だけ取る運用のため）。
+            {% if egress_state %}<br>
+            出口IPの記録を消すには
+            <code>docker compose run --rm ipcheck --clear-log</code>。
+            {% endif %}
         </div>
     </div>
 

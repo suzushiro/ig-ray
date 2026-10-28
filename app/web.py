@@ -43,6 +43,11 @@ PER_PAGE = 60
 # トンネルがまだ生きていても、公開ホスト名で来たリクエストは全部404にする。
 PUBLIC_SHARE_HOST = (config.env("PUBLIC_SHARE_HOST", "") or "").split(":")[0].lower()
 
+# 出口IP判定の記録に使う擬似アカウント名。check_egress.EGRESS_LOG_NAME と同じ値。
+# web は requests/instaloader を入れていないので import せず定数で持つ
+# （dev/egress_check.py で両者が一致していることを検査している）。
+EGRESS_LOG_NAME = "__egress__"
+
 app = Flask(__name__)
 
 # waitress 起動時（web:app）は __main__ を通らないので、ここでスキーマを整える。
@@ -486,14 +491,29 @@ def index():
     # （degraded も backfill の完了も正常。ここを直書きすると
     #  ステータスを増やしたとき成功が警告として出る）
     marks = ",".join("?" * len(db.OK_STATUSES))
+    # 出口IPの記録（擬似アカウント `__egress__`）はここから外す。
+    # 外さないと `__egress__(egress_error×4)` のように
+    # **普通のアカウントの失敗として混ざる**。専用バナーで別に出す。
     troubles = [dict(r) for r in c.execute(f"""
         SELECT username, status, COUNT(*) AS n
         FROM scrape_log
         WHERE status NOT IN ({marks})
+          AND username IS NOT ?
           AND ended_at > datetime('now', '-6 hours')
         GROUP BY username, status
         ORDER BY n DESC LIMIT 5
-    """, db.OK_STATUSES)]
+    """, tuple(db.OK_STATUSES) + (EGRESS_LOG_NAME,))]
+
+    # 出口IPの最新1件。12時間見るのは、6時間間隔の巡回で
+    # 1周ぶん飛んでも前回の記録が残るようにするため。
+    egress_alert = c.execute("""
+        SELECT status, message, ended_at FROM scrape_log
+        WHERE username = ? AND ended_at > datetime('now', '-12 hours')
+        ORDER BY id DESC LIMIT 1
+    """, (EGRESS_LOG_NAME,)).fetchone()
+    egress_alert = dict(egress_alert) if egress_alert else None
+    if egress_alert:
+        egress_alert["is_error"] = egress_alert["status"] == "egress_error"
 
     next_url = url_for("index", page=page + 1) if has_next else None
     if request.args.get("partial") == "1":
@@ -501,7 +521,7 @@ def index():
 
     return render_template("index.html", posts=posts, next_url=next_url,
                            total=total, last_jst=last_jst, troubles=troubles,
-                           hidden_total=hidden_total,
+                           hidden_total=hidden_total, egress_alert=egress_alert,
                            page=page, has_next=has_next)
 
 
@@ -788,18 +808,33 @@ def backup():
     # --- 定期巡回 -------------------------------------------------------
     cron_next = db.get_next_run(c, "scrape")
     # バックフィルは巡回とは別枠なので集計から外す（失敗ではない）
+    # 出口IPの記録はアカウントではないので、巡回の集計からは外す
+    # （外さないと「直近1周の結果」に混ざり、LIMIT の枠も1つ食う）
     last_sweep = c.execute(
-        "SELECT MAX(ended_at) AS t FROM scrape_log WHERE status != ?",
-        (db.BACKFILL_DONE,)).fetchone()["t"]
+        "SELECT MAX(ended_at) AS t FROM scrape_log "
+        "WHERE status != ? AND username IS NOT ?",
+        (db.BACKFILL_DONE, EGRESS_LOG_NAME)).fetchone()["t"]
 
-    # 直近1周ぶんの内訳。ended_at の降順で accounts 件数までを見る
+    # 直近1周ぶんの内訳。ended_at の降順で巡回対象の件数までを見る。
+    # is_target を見るのは enabled_accounts() と母数を揃えるため
     n_accounts = c.execute(
         "SELECT COUNT(*) AS n FROM accounts "
-        "WHERE is_enabled = 1 AND COALESCE(is_muted, 0) = 0").fetchone()["n"]
+        "WHERE is_enabled = 1 AND COALESCE(is_target, 0) = 1 "
+        "  AND COALESCE(is_muted, 0) = 0").fetchone()["n"]
     recent = [dict(r) for r in c.execute(
         "SELECT username, status, fetched, inserted, message, ended_at "
-        "FROM scrape_log WHERE status != ? "
-        "ORDER BY ended_at DESC LIMIT ?", (db.BACKFILL_DONE, max(n_accounts, 1)))]
+        "FROM scrape_log WHERE status != ? AND username IS NOT ? "
+        "ORDER BY ended_at DESC LIMIT ?",
+        (db.BACKFILL_DONE, EGRESS_LOG_NAME, max(n_accounts, 1)))]
+
+    # 出口IPの状態は専用の行で見せる。擬似アカウント名は画面に出さない
+    eg = c.execute(
+        "SELECT status, message, ended_at FROM scrape_log "
+        "WHERE username = ? ORDER BY id DESC LIMIT 1",
+        (EGRESS_LOG_NAME,)).fetchone()
+    egress_state = dict(eg) if eg else None
+    if egress_state:
+        egress_state["is_error"] = egress_state["status"] == "egress_error"
     cron_summary = {}
     for r in recent:
         cron_summary[r["status"]] = cron_summary.get(r["status"], 0) + 1
@@ -839,6 +874,7 @@ def backup():
         cron_last=last_sweep,
         cron_summary=cron_summary,
         cron_recent=recent,
+        egress_state=egress_state,
         cron_interval_h=round(config.env_float("INTERVAL", 21600) / 3600, 1),
         cron_limit=config.env_int("CRON_LIMIT", 6),
         n_accounts=n_accounts,

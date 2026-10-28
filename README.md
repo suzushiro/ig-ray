@@ -30,7 +30,7 @@ dev/fallback_check.py     web_profile_info 回避策のテスト（コンテナ�
 dev/probe_posts.py        投稿の生データを覗く診断（コンテナ非同梱）
 dev/route_check.py        表示層の疎通テスト（コンテナ非同梱）
 dev/migration_check.py    既存DBからのマイグレーション検証（コンテナ非同梱）
-dev/egress_check.py       設定まわり・出口IP判定のテスト（コンテナ非同梱）
+dev/egress_check.py       設定まわり・出口IP判定・バナーのテスト（コンテナ非同梱）
 app/backfill.py           全件バックフィル（キュー管理＋常駐ワーカー）
 app/tumblr_client.py      Tumblr API v2 クライアント（OAuth1）
 tools/tumblr_auth.py      Tumblrのアクセストークン取得（初回だけ・コンテナ非同梱）
@@ -60,7 +60,7 @@ python3 dev/accounts_check.py    # 35項目
 python3 dev/fallback_check.py    # 137項目
 python3 dev/route_check.py       # 113項目
 python3 dev/migration_check.py   # 21項目
-python3 dev/egress_check.py      # 37項目
+python3 dev/egress_check.py      # 124項目
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 36項目
 python3 dev/backfill_check.py    # 57項目
@@ -343,6 +343,67 @@ docker compose run --rm ipcheck
 **設定を変えたら毎回確認すること。** Docker ホストが IPv6 グローバルを
 持っている場合、環境変数を入れ忘れたコンテナは **IPv6 で元の回線から出る**。
 分離が黙って崩れるので、漏れに気づける仕組みが要る。
+
+### スクレイプ前の自動照合（v4.17）
+
+`IG_RAY_EXPECT_EGRESS_IP` を設定しておくと、`ig_scraper.py` が
+**ログインより先に**出口IPを照合する（漏れた状態でログインセッションを
+使いたくないため、`make_loader()` の前）。
+
+不一致のときに一律で止めてはいけない。住宅向け回線はグローバルIPが変わるので、
+止めると取得が死ぬ。X-Ray では実際にこれで**12日間取得が止まり**、
+その事実が `/var/log/scraper.log` にしか出ていなかったため誰も気づかなかった。
+
+そこで**プロキシを明示的に外して出口IPを測り直し、比較して切り分ける**。
+`requests` なら `Session.trust_env = False`。それだけでは `IG_RAY_PROXY` で
+明示的に渡した分が残るので、`proxies = {}` も併せて必要。
+
+| プロキシ経由 vs 直接 | `verdict` | 意味 | 動作 |
+|---|---|---|---|
+| 一致 | `match` | 期待どおり | 続行（記録しない） |
+| **違う** | `proxy_ip_changed` | プロキシは効いている。回線のIPが変わっただけ | **続行**して警告を記録 |
+| **同じ** | `proxy_bypassed` | プロキシを迂回している。分離が崩れた | **中止** |
+| プロキシ未設定で不一致 | `no_proxy_configured` | そもそも分離されていない | **中止** |
+| 直接の出口IPが取れない | `undetermined` | 迂回していないか判定できない | 安全側に倒して**中止** |
+| プロキシ経由でも取れない | `unreachable` | NWかプロキシが不調 | **中止** |
+| 期待値が空 | `unchecked` | 照合しない | 続行（記録しない） |
+
+`proxy_bypassed` と `no_proxy_configured` を分けているのは、どちらも中止だが
+**直す場所が違う**ため（`.env` にプロキシを書き忘れた／プロキシLXCが落ちた）。
+
+判定だけ見たいとき:
+
+```bash
+docker compose run --rm ipcheck --verdict
+```
+
+手で動かすときは `--skip-egress-check` で省略できる（cron では付けない）。
+中止しても `--cron` なら次回予定時刻は記録するので、`IG_RAY_INTERVAL` 後に
+再挑戦する。
+
+#### 記録と可視化
+
+**ログファイルだけでは気づけない。** これが X-Ray の12日沈黙の原因だった。
+
+`scrape_log` に擬似アカウント名 `__egress__` で残す。
+続行した警告は `egress_warn`、中止は `egress_error`。
+`match` と `unchecked`（＝正常）のときは**書かない**（6時間ごとの巡回で
+行が無駄に増えるだけ）。
+
+web画面のトップに専用バナーを出す。中止は `.health-error`（赤ベタ）、
+警告は既存の `.health-warn`。`reason` をそのまま表示するので、
+ログを掘らずに何が起きたか読める。
+
+`__egress__` は**アカウントではない**ので、
+トップの「直近6時間の失敗」一覧と `/backup` の「直近1周の結果」からは外してある
+（外さないと `__egress__(egress_error×4)` のように普通のアカウントの失敗として
+混ざる）。`/backup` では「🌐 出口IP」の行として別に見せる。
+
+`.env` を直したあとバナーを消す:
+
+```bash
+docker compose run --rm ipcheck --clear-log
+```
 
 - 画像の一括ダウンロードも同じ出口を通る（`ipcheck` の「メディアDL用セッション」で確認できる）
 - 分離先の回線が遅い場合、大量ダウンロード時のスループットは要観察

@@ -48,6 +48,15 @@ header h1 { font-size: 18px; margin: 0 0 2px 0; }
 }
 .health-ok { background: rgba(0,186,124,0.12); color: #00ba7c; }
 .health-warn { background: rgba(244,33,46,0.10); color: #f4212e; }
+/* 中止（出口の分離が崩れた等）。警告より強く出す。
+   取得が止まっているので、見逃されないこと自体が仕様。 */
+.health-error {
+    background: #f4212e; color: #fff; font-weight: 600;
+    /* reason は1行だが長い。inline-flex は既定で折り返さないので、
+       幅の狭い窓でヘッダを横に押し広げないよう明示的に折り返す。 */
+    align-items: flex-start; flex-wrap: wrap;
+    max-width: 100%; line-height: 1.5;
+}
 .health-account { font-weight: 600; }
 .health-link { color: inherit; text-decoration: underline; }
 
