@@ -373,6 +373,32 @@ def mute_dialog_tests(cl):
     cl.post("/api/mute/toggle", json={"username": "full_user", "muted": False})
 
 
+def test_version():
+    """
+    バージョンの定義は config.VERSION の1箇所だけ。
+
+    見出しに出す値・README の記載・配布 zip の名前がズレると、
+    「どれが動いているのか」が分からなくなる。
+    ここで config と README の一致を固定しておく。
+    """
+    print("\n[バージョン表示]")
+    import config
+    import re
+    check("config.VERSION がある", bool(getattr(config, "VERSION", None)))
+    check("x.y 形式", re.fullmatch(r"\d+\.\d+(\.\d+)?", config.VERSION),
+          config.VERSION)
+
+    readme = os.path.join(os.path.dirname(__file__), "..", "README.md")
+    with open(readme, encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"^現在のバージョン:\s*(\S+)\s*$", text, re.M)
+    check("README にバージョンの記載がある", m is not None)
+    if m:
+        check("README と config.VERSION が一致",
+              m.group(1) == config.VERSION,
+              f"README={m.group(1)} config={config.VERSION}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="instaray_web_")
     dbfile = os.path.join(tmp, "t.db")
@@ -400,8 +426,15 @@ def main():
         r = cl.get(path)
         check(f"{label} {path}", r.status_code == 200, f"status={r.status_code}")
 
+    test_version()
+
     print("\n[2] 内容が出ているか")
     body = cl.get("/").get_data(as_text=True)
+    import config as _cfg
+    check("見出しにバージョンが出る",
+          f'<span class="ver">v{_cfg.VERSION}</span>' in body,
+          [l for l in body.splitlines() if "<h1>" in l][:1])
+    check("(α) も残っている", '<span class="alpha">(α)</span>' in body)
     check("投稿が描画される", "ふつうの投稿" in body)
     check("カルーセルのバッジが出る", "3枚" in body, "")
     check("ジオタグが出る", "Shibuya" in body)

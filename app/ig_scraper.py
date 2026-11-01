@@ -75,6 +75,25 @@ PROXY = config.env("PROXY", "")
 # --cron 付きで呼ばれたとき、次回予定時刻の算出に使う。
 CRON_INTERVAL = config.env_float("INTERVAL", 21600)
 
+# ログイン検証が続けて失敗したときの再挑戦間隔の上限（秒）。既定24時間。
+# 401 "Please wait a few minutes" はレート超過ではなく**アカウント側の制限**で、
+# 叩き続けると解除が延びる。6時間おきに叩き続けて24日沈黙した実績があるので、
+# 連続失敗の回数ぶん間隔を倍にして上限で頭打ちにする。
+LOGIN_BACKOFF_MAX = config.env_float("LOGIN_BACKOFF_MAX", 86400)
+
+
+def login_retry_delay(n_failures):
+    """
+    ログイン失敗が n 回続いたときに、次に試すまで空ける秒数。
+
+    1回目は通常間隔のまま（偶発的な失敗で間隔を延ばさない）。
+    2回目以降は倍々にして LOGIN_BACKOFF_MAX で頭打ち。
+    """
+    if n_failures <= 1:
+        return CRON_INTERVAL
+    delay = CRON_INTERVAL * (2 ** (n_failures - 1))
+    return min(delay, LOGIN_BACKOFF_MAX)
+
 
 def _nap():
     time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
@@ -867,6 +886,17 @@ def _scrape_posts(conn, loader, profile, username, limit,
             "started_at": started}
 
 
+def _login_error_summary(err, limit=300):
+    """
+    make_loader のエラー文は対処手順を含む長文なので、画面用に先頭だけ取る。
+
+    対処手順は `docker compose logs cron` に出ている。
+    画面に出したいのは「何が起きたか」であって手順書ではない。
+    """
+    text = " ".join((err or "ログインに失敗しました").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def main():
     ap = argparse.ArgumentParser(description="insta-ray scraper (PoC)")
     ap.add_argument("usernames", nargs="*", help="取得対象。省略時は accounts テーブル")
@@ -892,6 +922,34 @@ def main():
 
     conn = db.connect(args.db)
     db.init_db(conn)
+
+    # --- バックオフ中なら何もせず抜ける -------------------------------
+    #
+    # cron のシェルは `sleep $IG_RAY_INTERVAL` で固定なので、
+    # **次回予定を延ばすだけでは実際の間隔は延びない。**
+    # 起動直後に予定時刻を見て、まだ来ていなければ Instagram を一切叩かずに戻る。
+    # 401 が続いている間に叩き続けると制限が延びるため。
+    #
+    # 判定は clear_next_run の**前**に行う（消してからでは読めない）。
+    # 通常運転に影響させないよう、ログイン失敗が2回以上続いているときだけ効かせる。
+    if args.cron:
+        try:
+            n_fail = db.consecutive_failures(conn, db.LOGIN_LOG_NAME,
+                                             ("login_error",))
+            if n_fail > 1:
+                nxt = db.get_next_run(conn, "scrape")
+                now = datetime.now(timezone.utc)
+                # シェルの sleep と予定時刻のズレを吸収する余裕
+                if nxt and (nxt - now).total_seconds() > 60:
+                    mins = int((nxt - now).total_seconds() / 60)
+                    print(f"ログイン失敗が {n_fail} 回続いているため待機中です。"
+                          f"次回は {nxt.astimezone().strftime('%Y-%m-%d %H:%M')}"
+                          f"（あと {mins} 分）。"
+                          f"今回は Instagram を叩かずに終了します。")
+                    conn.close()
+                    return 0
+        except Exception:
+            pass    # 判定できなくても巡回自体は止めない
 
     # 巡回が始まったので「次回予定」は一旦消す（走っている最中は予定ではない）
     if args.cron:
@@ -929,14 +987,42 @@ def main():
     loader, err = make_loader(args.login_user, verify=not args.skip_verify)
     if loader is None:
         print(err)
+        # **scrape_log に残す。** ここを残していなかったために、
+        # 401 で24日止まっていたのに画面は「直近6時間の失敗なし」と
+        # 出し続けていた（出口IPのぶんだけ塞いでここを見落としていた）。
+        n = 1
+        try:
+            db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_error", 0, 0,
+                          _login_error_summary(err))
+            conn.commit()
+            n = db.consecutive_failures(conn, db.LOGIN_LOG_NAME,
+                                        ("login_error",))
+        except Exception as e:
+            print(f"  [警告] ログイン失敗の記録に失敗: {e}", file=sys.stderr)
         if args.cron:
-            # ログインできなくても cron は INTERVAL 後に再挑戦する
+            # 失敗が続くほど間隔を空ける。401 は叩くほど解除が延びるため。
+            delay = login_retry_delay(n)
             try:
-                db.set_next_run(conn, "scrape", CRON_INTERVAL)
+                when = db.set_next_run(conn, "scrape", delay)
+                if n > 1:
+                    print(f"  ログイン失敗が {n} 回続いています。"
+                          f"次回は {when.astimezone().strftime('%Y-%m-%d %H:%M')} "
+                          f"まで待ちます（叩き続けると制限が延びるため）")
             except Exception:
                 pass
         conn.close()
         return 2
+
+    # ログインできた。失敗の連続を切っておく
+    # （切らないと consecutive_failures が古い失敗を数え続け、
+    #   復旧しても間隔が延びたままになる）。
+    try:
+        if db.consecutive_failures(conn, db.LOGIN_LOG_NAME, ("login_error",)):
+            db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_ok", 0, 0,
+                          "ログインできました")
+            conn.commit()
+    except Exception:
+        pass
 
     targets = args.usernames or db.enabled_accounts(conn)
     if not targets:

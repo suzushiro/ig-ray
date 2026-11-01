@@ -27,6 +27,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config  # noqa: E402
+import db  # noqa: E402
 
 # IPv4 / IPv6 を区別して見たいので複数使う
 V4_URL = "https://api.ipify.org"
@@ -87,10 +88,10 @@ CONTINUE_VERDICTS = ("match", "unchecked", "proxy_ip_changed")
 # scrape_log に記録しない verdict（正常なので6時間ごとに行を増やす意味がない）
 QUIET_VERDICTS = ("match", "unchecked")
 
-# scrape_log に入れる擬似アカウント名。
-# 実在しないユーザー名にしたいので前後にアンダースコアを置く
-# （IGのユーザー名は英数字・_・. なので `__egress__` は衝突しない）。
-EGRESS_LOG_NAME = "__egress__"
+# scrape_log に入れる擬似アカウント名。**定義は db.py に一本化してある**
+# （web / scraper / ここの3箇所で別々に持つと、片方だけ直して
+#   画面のフィルタが効かなくなる）。
+EGRESS_LOG_NAME = db.EGRESS_LOG_NAME
 
 
 def _fetch_global_ip(session=None, url=V4_URL, timeout=20):
@@ -221,7 +222,6 @@ def log_egress(conn, result):
     if result.get("verdict") in QUIET_VERDICTS:
         return False
     status = "egress_warn" if result.get("ok") else "egress_error"
-    import db
     db.log_scrape(conn, EGRESS_LOG_NAME, status, 0, 0, result.get("reason"))
     return True
 
@@ -252,7 +252,6 @@ def main():
     # --clear-log は測定をせずに終わる（.env 修正直後に叩くため、
     # まだ出口が直っていなくても使えるようにする）
     if args.clear_log:
-        import db
         conn = db.connect(args.db)
         db.init_db(conn)
         try:

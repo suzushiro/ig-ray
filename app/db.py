@@ -736,6 +736,55 @@ def seconds_since_activity(conn, who):
     return (datetime.now(timezone.utc) - t).total_seconds()
 
 
+# 巡回が「アカウントに到達する前に」死んだときに使う擬似アカウント名。
+#
+# **これらは IG のユーザー名として文法上は有効**（英数字・`_`・`.` が使えるので
+# `__egress__` は実在しうる）。衝突しないことを祈るのではなく、
+# seed_accounts 側で**予約語として登録を拒否**して衝突を起こせなくしている。
+#
+# これらは**アカウントではない**ので、
+# 画面の「直近N時間の失敗」一覧や巡回の集計からは外すこと。
+EGRESS_LOG_NAME = "__egress__"
+LOGIN_LOG_NAME = "__login__"
+PSEUDO_ACCOUNTS = (EGRESS_LOG_NAME, LOGIN_LOG_NAME)
+
+
+def consecutive_failures(conn, username, statuses):
+    """
+    末尾から数えて status が statuses に含まれる行が何件続いているか。
+
+    ログイン失敗が何周続いているかを見るのに使う。
+    401 が出ている状態で叩き続けると制限が延びるので、
+    続いた回数に応じて再挑戦の間隔を延ばす判断に使う。
+    """
+    n = 0
+    for r in conn.execute(
+            "SELECT status FROM scrape_log WHERE username = ? "
+            "ORDER BY id DESC LIMIT 50", (username,)):
+        if r["status"] in statuses:
+            n += 1
+        else:
+            break
+    return n
+
+
+def last_success_at(conn):
+    """
+    最後に**アカウントを1件でも取れた**時刻（ISO文字列）。未取得なら None。
+
+    擬似アカウントの行とバックフィル完了は除く。
+    「巡回が止まっていないか」を原因に関係なく見るために使う。
+    """
+    marks = ",".join("?" * len(OK_STATUSES))
+    pseudo = ",".join("?" * len(PSEUDO_ACCOUNTS))
+    row = conn.execute(
+        f"SELECT MAX(ended_at) AS t FROM scrape_log "
+        f"WHERE status IN ({marks}) AND status != ? "
+        f"  AND COALESCE(username, '') NOT IN ({pseudo})",
+        tuple(OK_STATUSES) + (BACKFILL_DONE,) + PSEUDO_ACCOUNTS).fetchone()
+    return row["t"] if row else None
+
+
 def set_next_run(conn, who, seconds_from_now):
     """
     次に動く予定の時刻を記録する。

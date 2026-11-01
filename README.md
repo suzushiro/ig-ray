@@ -1,5 +1,7 @@
 # IG-Ray
 
+現在のバージョン: 4.18
+
 X-Ray の Instagram 版。**完全独立フォーク**（X-Ray と共通ライブラリ化はしない）。
 スクレイパ層 + Docker 運用 + 表示層（フィード / ユーザーページ / ギャラリー / ブックマーク）。
 
@@ -31,6 +33,7 @@ dev/probe_posts.py        投稿の生データを覗く診断（コンテナ非
 dev/route_check.py        表示層の疎通テスト（コンテナ非同梱）
 dev/migration_check.py    既存DBからのマイグレーション検証（コンテナ非同梱）
 dev/egress_check.py       設定まわり・出口IP判定・バナーのテスト（コンテナ非同梱）
+dev/silence_check.py      巡回停止の検知・バックオフのテスト（コンテナ非同梱）
 app/backfill.py           全件バックフィル（キュー管理＋常駐ワーカー）
 app/tumblr_client.py      Tumblr API v2 クライアント（OAuth1）
 tools/tumblr_auth.py      Tumblrのアクセストークン取得（初回だけ・コンテナ非同梱）
@@ -58,9 +61,10 @@ python3 dev/ratelimit_check.py   # 23項目
 python3 dev/loader_check.py      # 20項目
 python3 dev/accounts_check.py    # 35項目
 python3 dev/fallback_check.py    # 137項目
-python3 dev/route_check.py       # 113項目
+python3 dev/route_check.py       # 119項目
 python3 dev/migration_check.py   # 21項目
 python3 dev/egress_check.py      # 124項目
+python3 dev/silence_check.py     # 77項目（巡回が黙って止まるのを検知できるか）
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 36項目
 python3 dev/backfill_check.py    # 57項目
@@ -380,6 +384,68 @@ docker compose run --rm ipcheck --verdict
 手で動かすときは `--skip-egress-check` で省略できる（cron では付けない）。
 中止しても `--cron` なら次回予定時刻は記録するので、`IG_RAY_INTERVAL` 後に
 再挑戦する。
+
+### 巡回が黙って止まるのを防ぐ（v4.18）
+
+**二度やらかしている。** X-Ray が出口IP判定の中止で12日、IG-Ray が 401 の
+ログイン失敗で**24日**、どちらも誰にも気づかれずに止まっていた。
+どちらも「失敗の記録が残らない経路」だったのが原因。
+
+対策は3つ入れてある。
+
+#### 1. ログイン失敗を記録する
+
+`make_loader()` が失敗する経路は `scrape_log` に何も書いていなかった。
+結果として画面は「最終更新 10/5」のまま固まり、健康バナーは
+**「✓ 直近6時間の失敗なし」と出し続けた**。失敗が無いのではなく、
+失敗が記録される手前で死んでいた。
+
+擬似アカウント `__login__` に `login_error` として残し、トップに専用バナーを出す。
+復旧したら `login_ok` を1件入れて連続を切る。
+
+#### 2. 止まっていること自体を見る（原因非依存）
+
+**原因を列挙するやり方には限界がある。** 出口IP・ログインと塞いできたが、
+想定していない死に方は必ず残る。そこで理由を問わず
+「最後に1件でも取れた時刻」だけを見る見張りを別に置いた。
+
+巡回間隔の `IG_RAY_STALE_INTERVALS` 倍（既定3倍＝6時間間隔なら18時間）を
+超えて音沙汰が無ければ、赤バナーで「巡回が止まっています」と出す。
+1周落としただけでは鳴らない。
+
+このとき「直近6時間の失敗なし」は**出さない**。
+
+> **「最終更新」は擬似アカウントの行で動かしてはいけない。**
+> `scrape_log` の最新行をそのまま見ると、ログイン失敗や出口IPの記録で
+> 時刻が更新され、1件も取れていないのに「たった今更新された」と嘘をつく。
+> `db.last_success_at()` が擬似アカウントとバックフィル完了を除いて返す。
+
+#### 3. 失敗が続いたら叩く間隔を延ばす
+
+401 `"Please wait a few minutes before you try again."` は
+レート超過ではなく**アカウント側の制限**で、叩き続けると解除が延びる。
+IG-Ray 自身のエラーメッセージにそう書いてあるのに、
+cron は6時間おきに24日間＝約96回叩き続けていた。
+
+連続失敗の回数ぶん間隔を倍にし、`IG_RAY_LOGIN_BACKOFF_MAX`（既定24時間）で
+頭打ちにする。1回目は延ばさない（偶発的な失敗で間隔を変えない）。
+
+**cron のシェルは `sleep $IG_RAY_INTERVAL` で固定なので、
+次回予定を延ばすだけでは実際の間隔は延びない。**
+スクレイパーが起動直後に予定時刻を見て、まだ来ていなければ
+Instagram を一切叩かずに `return 0` する。
+同じ条件で24日動かしたとき、叩く回数は96回から約25回に減る。
+
+手動実行（`--cron` 無し）はバックオフを無視する。
+
+#### 擬似アカウント名は予約語
+
+`__egress__` と `__login__` は **IG のユーザー名として文法上は有効**
+（英数字・`_`・`.` が使えるため）。衝突しないことを祈るのではなく、
+`seed_accounts.normalize()` が予約語として登録を拒否する。
+定義は `db.PSEUDO_ACCOUNTS` に一本化してある
+（web / scraper / check_egress で別々に持つと、片方だけ直して
+画面のフィルタが効かなくなる）。
 
 #### 記録と可視化
 

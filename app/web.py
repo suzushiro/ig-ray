@@ -43,10 +43,16 @@ PER_PAGE = 60
 # トンネルがまだ生きていても、公開ホスト名で来たリクエストは全部404にする。
 PUBLIC_SHARE_HOST = (config.env("PUBLIC_SHARE_HOST", "") or "").split(":")[0].lower()
 
-# 出口IP判定の記録に使う擬似アカウント名。check_egress.EGRESS_LOG_NAME と同じ値。
-# web は requests/instaloader を入れていないので import せず定数で持つ
-# （dev/egress_check.py で両者が一致していることを検査している）。
-EGRESS_LOG_NAME = "__egress__"
+# 巡回がアカウントに到達する前に死んだことを記録する擬似アカウント名。
+# **定義は db.py**（web は requests/instaloader を入れていないので
+# check_egress は import できないが、db なら共有できる）。
+EGRESS_LOG_NAME = db.EGRESS_LOG_NAME
+LOGIN_LOG_NAME = db.LOGIN_LOG_NAME
+
+# 巡回間隔の何倍音沙汰が無ければ「止まっている」とみなすか。
+# 3 なら 6時間間隔で18時間。1周ぶん落としただけでは鳴らず、
+# 丸半日以上止まったら鳴る。
+STALE_INTERVALS = config.env_float("STALE_INTERVALS", 3)
 
 app = Flask(__name__)
 
@@ -334,6 +340,12 @@ def _restrict_public_host():
 
 
 @app.context_processor
+def _inject_version():
+    """見出しに出すバージョン。全テンプレートから見える。"""
+    return {"app_version": config.VERSION}
+
+
+@app.context_processor
 def _inject_share_flags():
     """
     テンプレート全体から Tumblr 投稿の有効/無効を見えるようにする。
@@ -474,8 +486,11 @@ def index():
         f"SELECT COUNT(*) AS n FROM posts {where}", hide_params).fetchone()["n"]
     hidden_total = c.execute("SELECT COUNT(*) AS n FROM posts").fetchone()["n"] - total
 
-    last = c.execute(
-        "SELECT ended_at FROM scrape_log ORDER BY id DESC LIMIT 1").fetchone()
+    # **「最後に1件でも取れた時刻」を出す。** 単に scrape_log の最新行を見ると、
+    # ログイン失敗や出口IPの記録で時刻が更新され、
+    # 1件も取れていないのに「たった今更新された」と嘘をつく
+    # （この表示が24日の沈黙に気づく唯一の手掛かりだった）。
+    last = {"ended_at": db.last_success_at(c)}
     last_jst = None
     if last and last["ended_at"]:
         try:
@@ -494,15 +509,16 @@ def index():
     # 出口IPの記録（擬似アカウント `__egress__`）はここから外す。
     # 外さないと `__egress__(egress_error×4)` のように
     # **普通のアカウントの失敗として混ざる**。専用バナーで別に出す。
+    pseudo = ",".join("?" * len(db.PSEUDO_ACCOUNTS))
     troubles = [dict(r) for r in c.execute(f"""
         SELECT username, status, COUNT(*) AS n
         FROM scrape_log
         WHERE status NOT IN ({marks})
-          AND username IS NOT ?
+          AND COALESCE(username, '') NOT IN ({pseudo})
           AND ended_at > datetime('now', '-6 hours')
         GROUP BY username, status
         ORDER BY n DESC LIMIT 5
-    """, tuple(db.OK_STATUSES) + (EGRESS_LOG_NAME,))]
+    """, tuple(db.OK_STATUSES) + db.PSEUDO_ACCOUNTS)]
 
     # 出口IPの最新1件。12時間見るのは、6時間間隔の巡回で
     # 1周ぶん飛んでも前回の記録が残るようにするため。
@@ -515,6 +531,38 @@ def index():
     if egress_alert:
         egress_alert["is_error"] = egress_alert["status"] == "egress_error"
 
+    # ログイン失敗。巡回がアカウントに到達する前に死んだ理由として最も多い。
+    login_alert = c.execute("""
+        SELECT status, message, ended_at FROM scrape_log
+        WHERE username = ? ORDER BY id DESC LIMIT 1
+    """, (LOGIN_LOG_NAME,)).fetchone()
+    login_alert = dict(login_alert) if login_alert else None
+    if login_alert and login_alert["status"] != "login_error":
+        login_alert = None      # 直近は成功している
+
+    # --- 巡回が止まっていないかの見張り --------------------------------
+    #
+    # **原因を列挙しない。** 出口IP・ログインと塞いできたが、
+    # 「想定していなかった死に方」は必ず残る。最後に1件でも取れた時刻だけを見て、
+    # 間隔の何倍も経っていたら理由が分からなくても警告を出す。
+    # これが無かったせいで24日気づかなかった。
+    stale = None
+    last_ok = db.last_success_at(c)
+    interval_h = config.env_float("INTERVAL", 21600) / 3600.0
+    limit_h = max(interval_h * STALE_INTERVALS, 1.0)
+    if last_ok:
+        try:
+            t = datetime.fromisoformat(last_ok.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            hours = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+            if hours > limit_h:
+                stale = {"hours": int(hours), "days": round(hours / 24, 1),
+                         "since": t.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
+                         "limit_h": round(limit_h, 1)}
+        except (TypeError, ValueError):
+            pass
+
     next_url = url_for("index", page=page + 1) if has_next else None
     if request.args.get("partial") == "1":
         return render_template("_feed.html", posts=posts, next_url=next_url)
@@ -522,6 +570,7 @@ def index():
     return render_template("index.html", posts=posts, next_url=next_url,
                            total=total, last_jst=last_jst, troubles=troubles,
                            hidden_total=hidden_total, egress_alert=egress_alert,
+                           login_alert=login_alert, stale=stale,
                            page=page, has_next=has_next)
 
 

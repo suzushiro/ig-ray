@@ -17,7 +17,7 @@
 
 <header>
     <div class="header-left">
-        <h1>IG-Ray<span class="alpha">(α)</span></h1>
+        <h1>IG-Ray<span class="alpha">(α)</span><span class="ver">v{{ app_version }}</span></h1>
         <div class="meta">
             全{{ total }}件
             {% if hidden_total %} ・ <span title="監視対象以外のアカウント（共同投稿の相手・関連投稿）とミュート分です。データは残っています。">非表示 {{ hidden_total }}件</span>{% endif %}
@@ -26,6 +26,23 @@
         {# 出口IPの判定。失敗の一覧とは別枠で出す。
            ここを専用にしているのは、取得が止まった事実をログを掘らずに
            読めるようにするため（X-Rayでは12日気づかなかった）。 #}
+        {# 巡回そのものが止まっている。原因が何であれ必ず出す。
+           出口IP・ログインと個別に塞いできたが、想定外の死に方は必ず残るので
+           「最後に取れた時刻」だけを見る見張りを別に置いている。 #}
+        {% if stale %}
+        <div class="health health-error">
+            🛑 巡回が止まっています:
+            <span>最後に取得できたのは {{ stale.since }} JST（{{ stale.days }}日前）です。
+                巡回間隔の {{ stale.limit_h }} 時間を超えて音沙汰がありません。
+                <code>docker compose logs --tail=80 cron</code> を確認してください。</span>
+        </div>
+        {% endif %}
+        {% if login_alert %}
+        <div class="health health-error">
+            🔑 ログインできていません:
+            <span>{{ login_alert.message }}</span>
+        </div>
+        {% endif %}
         {% if egress_alert %}
         <div class="health {{ 'health-error' if egress_alert.is_error else 'health-warn' }}">
             {% if egress_alert.is_error %}🛑 出口IPの確認に失敗し、取得を中止しています:
@@ -40,7 +57,9 @@
             <span class="health-account">{{ t.username }}({{ t.status }}×{{ t.n }})</span>
             {% endfor %}
         </div>
-        {% else %}
+        {% elif not stale and not login_alert %}
+        {# stale / login_alert のときは「失敗なし」と出さない。
+           失敗が無いのではなく、失敗が記録される手前で死んでいる。 #}
         <div class="health health-ok">✓ 直近6時間の失敗なし</div>
         {% endif %}
     </div>

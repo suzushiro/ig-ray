@@ -57,6 +57,10 @@ x-worker-base: &worker-base
     IG_RAY_BACKFILL_KNOWN_STREAK: "${IG_RAY_BACKFILL_KNOWN_STREAK:-30}"
     IG_RAY_BACKFILL_QUIET_SEC: "${IG_RAY_BACKFILL_QUIET_SEC:-180}"
     IG_RAY_BACKFILL_RATELIMIT_BACKOFF: "${IG_RAY_BACKFILL_RATELIMIT_BACKOFF:-3600}"
+    # ジョブが無いときの待ち（秒）。compose に書き忘れていて .env が届いていなかった
+    IG_RAY_BACKFILL_IDLE_SLEEP: "${IG_RAY_BACKFILL_IDLE_SLEEP:-300}"
+    # ログイン検証が続けて失敗したときの再挑戦間隔の上限（秒）
+    IG_RAY_LOGIN_BACKOFF_MAX: "${IG_RAY_LOGIN_BACKOFF_MAX:-86400}"
     IG_RAY_PROXY: "${IG_RAY_PROXY:-}"
     # --- 出口の分離（別回線側のプロキシ経由で出す・任意） -----------------
     # requests / instaloader は標準でこの環境変数を見る。
@@ -232,6 +236,10 @@ services:
       IG_RAY_DB: ${IG_RAY_DB:-}
       IG_RAY_CACHE: /data/cache
       IG_RAY_CACHE_RETENTION_DAYS: "${IG_RAY_CACHE_RETENTION_DAYS:-30}"
+      # 巡回停止の判定に使う。worker 側の INTERVAL と揃っていないと
+      # 「何時間で止まったとみなすか」がズレる
+      IG_RAY_INTERVAL: "${IG_RAY_INTERVAL:-21600}"
+      IG_RAY_STALE_INTERVALS: "${IG_RAY_STALE_INTERVALS:-3}"
       # Tumblr 投稿（OAuth API 方式）。これが唯一の投稿経路。
       # 未設定なら機能まるごと無効（t ボタンも出ない、APIも400）
       TUMBLR_CONSUMER_KEY: "${TUMBLR_CONSUMER_KEY:-}"

@@ -40,7 +40,14 @@ def normalize(name):
         name = m.group(1)
     name = name.lstrip("@").strip("/")
     name = name.lower()
-    return name if VALID.match(name) else None
+    if not VALID.match(name):
+        return None
+    # 擬似アカウント名は予約語。文法上は有効なユーザー名なので、
+    # ここで弾かないと本物のアカウントとして登録できてしまい、
+    # 画面のフィルタと衝突する（投稿が消える・ログが混ざる）。
+    if name in db.PSEUDO_ACCOUNTS:
+        return None
+    return name
 
 
 def cmd_add(conn, args):
