@@ -12,8 +12,15 @@ instaloader の load_session_from_file() はファイルを読むだけで、
 このスクリプトは段階的に確かめる:
   [A] セッションファイルが存在し、pickle として読めるか
   [B] クッキーに sessionid があるか（＝ログイン済みの形をしているか）
-  [C] test_login() が username を返すか（＝サーバ側でまだ有効か）
-  [D] 実際にプロフィールを1件引けるか
+  [C] そのセッションで自分の投稿を1ページ引けるか（＝巡回と同じ経路）
+  [D] 対象アカウントの投稿を1ページ引けるか
+
+**test_login() と Profile.from_username() は使わない。**
+  test_login() が叩く旧式 query_hash は 2026-10 に廃止され、有効なセッションでも
+  必ず失敗する（instaloader 4.16 でも未修正、上流 issue #2792）。
+  from_username() は web_profile_info を叩き、ここは恒常的に 429。
+  どちらも「セッションが死んでいる」と誤診させるので、巡回が実際に使う
+  get_posts() の1ページ目だけで判定する。
 
     python dev/diag_session.py [対象アカウント名]
 """
@@ -80,81 +87,66 @@ def main():
         return 1
 
     # ---------------------------------------------------------------- [C]
-    hr("[C] サーバ側でセッションが有効か（test_login）")
+    hr(f"[C] 自分の投稿を1ページ引けるか（{LOGIN_USER}・巡回と同じ経路）")
     import instaloader
 
-    # 診断ツールが 666 秒眠ったら本末転倒なので、本体と同じ fail-fast を刺す
+    # 診断ツールが長時間眠ったら本末転倒なので、本体と同じ fail-fast を刺す
     import ig_scraper as igs
 
+    print(f"instaloader: {instaloader.__version__}")
     L = instaloader.Instaloader(quiet=True, sleep=True,
                                 download_pictures=False, download_videos=False,
                                 download_video_thumbnails=False, save_metadata=False,
                                 max_connection_attempts=1,
                                 rate_controller=igs.make_rate_controller(max_sleep=30))
-
-    proxy = os.environ.get("IG_RAY_PROXY", "")
-    if proxy:
-        L.context._session.proxies = {"http": proxy, "https": proxy}
-        print(f"プロキシ経由: {proxy.split('@')[-1]}")
     try:
         L.load_session_from_file(LOGIN_USER, session_file)
     except Exception as e:
         print(f"NG: load_session_from_file 失敗: {type(e).__name__}: {e}")
         return 1
-    print("load_session_from_file: OK（※これはファイルを読んだだけ）")
+    # **プロキシは load_session の後に入れる**（_session が作り直されるため）
+    proxy = os.environ.get("IG_RAY_PROXY", "")
+    if proxy:
+        L.context._session.proxies = {"http": proxy, "https": proxy}
+        print(f"プロキシ経由: {proxy.split('@')[-1]}")
 
-    try:
-        who = L.test_login()
-    except igs.RateLimitAbort as e:
-        print(f"NG: レート制限で中止 — {e}")
-        who = None
-    except Exception as e:
-        print(f"test_login が例外: {type(e).__name__}: {e}")
-        who = None
-
-    if who:
-        print(f"OK: サーバは '{who}' として認識しています。セッションは有効。")
+    ok, err = igs.verify_session(L, LOGIN_USER)
+    if ok:
+        print("OK: 投稿を引けました。セッションは有効です。")
     else:
-        print("NG: test_login が None を返しました。")
-        print("   考えられる原因:")
-        print("     - セッション失効（作り直しで直る）")
-        print("     - アカウントがチャレンジ要求中（ブラウザでログインして本人確認）")
-        print("     - このIPからのアクセスがブロックされている")
-        print("   → ブラウザで同アカウントにログインし、警告が出ないか確認してください。")
-
-    print(f"context.is_logged_in: {L.context.is_logged_in}")
+        print(f"NG: {err}")
+        if igs.is_session_failure(err):
+            print("   セッション起因の失敗です。")
+            print("   ブラウザで同じアカウントにログインし、警告が出ていないか確認して、")
+            print("   クッキーを取り直してください（import-cookies）。")
+        else:
+            print("   セッション以外の失敗です。エラー文をそのまま確認してください。")
 
     # ---------------------------------------------------------------- [D]
     if not target:
         print("\n（対象アカウント名を引数で渡すと [D] も実行します）")
-        return 0 if who else 1
+        return 0 if ok else 1
 
-    hr(f"[D] 実際にプロフィールを引く: {target}")
-    from instaloader.exceptions import (
-        TooManyRequestsException, ProfileNotExistsException,
-        LoginRequiredException, ConnectionException,
-    )
+    hr(f"[D] 対象の投稿を1ページ引く: {target}")
     try:
-        p = instaloader.Profile.from_username(L.context, target)
-        print(f"OK: {p.username} / followers={p.followers} / posts={p.mediacount}")
+        p = igs.minimal_profile(L.context, target)
+        posts = []
+        for post in p.get_posts():
+            posts.append(post)
+            if len(posts) >= 3:
+                break
+        print(f"OK: {len(posts)} 件取れました")
+        for post in posts:
+            print(f"   {post.shortcode} {post.typename} {post.date_utc:%Y-%m-%d}")
         print("→ スクレイパ本体も通るはずです。")
         return 0
     except igs.RateLimitAbort as e:
         print(f"NG: レート制限で中止 — {e}")
-        print("   長時間待機を要求されました（＝サーバに強く拒否されている）。")
-    except TooManyRequestsException as e:
-        print(f"NG: 429 — {e}")
-        print("   [C] が OK なのに 429 なら、IP が弾かれている可能性が高いです。")
-        print("   別のネットワーク（自宅回線・テザリング）から試して切り分けてください。")
-    except LoginRequiredException as e:
-        print(f"NG: ログインが必要 — {e}")
-        print("   セッションが実質効いていません。作り直してください。")
-    except ProfileNotExistsException:
-        print("NG: そのアカウントは存在しません（名前を確認）")
-    except ConnectionException as e:
-        print(f"NG: 接続エラー — {e}")
+    except Exception as e:
+        print(f"NG: {type(e).__name__}: {e}")
+        if igs.is_session_failure(str(e)):
+            print("   セッション起因の失敗です（[C] も確認してください）。")
     return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

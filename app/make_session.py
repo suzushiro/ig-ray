@@ -78,24 +78,22 @@ def main():
         del passwd
 
     # 作った直後に有効性を確かめる。ここで通らないセッションは保存しても無駄。
-    who = None
-    try:
-        who = L.test_login()
-    except Exception as e:
-        print(f"検証中にエラー: {type(e).__name__}: {e}")
-
-    if not who:
-        print("ログインはできましたが、検証クエリが通りませんでした。")
-        print("アカウントがソフトブロック中の可能性があります。")
-        print("セッション自体は保存しますが、しばらく待ってから使ってください。")
+    # **test_login() は使わない。** 叩く先（旧式 query_hash）が 2026-10 に
+    # 廃止されていて、有効なセッションでも必ず失敗する。巡回と同じ経路
+    # （自分の投稿の1ページ目）で確かめる。
+    import ig_scraper as igs
+    ok, err = igs.verify_session(L, user)
+    if not ok:
+        print(f"ログインはできましたが、投稿を引けませんでした: {err}")
+        print("セッション自体は保存しますが、diag で確認してから使ってください。")
     else:
-        print(f"ログイン確認: {who}")
+        print(f"ログイン確認: {user} の投稿を引けました")
 
     L.save_session_to_file(session_file)
     os.chmod(session_file, 0o600)
     print(f"保存しました: {session_file}")
     print("（このファイルはパスワード同等の価値があります。取り扱い注意）")
-    return 0 if who else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -1,2 +1,2 @@
-instaloader==4.15.3
+instaloader==4.16
 requests>=2.31.0

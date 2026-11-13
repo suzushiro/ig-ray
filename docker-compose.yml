@@ -89,7 +89,9 @@ services:
   login:
     <<: *worker-base
     profiles: ["tools"]
-    command: ["python", "make_session.py"]
+    # entrypoint 方式に揃える（command: だと引数でコマンドごと置き換わる）
+    entrypoint: ["/usr/bin/tini", "--", "python", "make_session.py"]
+    command: []
     stdin_open: true
     tty: true
 
@@ -100,7 +102,13 @@ services:
   import-cookies:
     <<: *worker-base
     profiles: ["tools"]
-    command: ["python", "import_cookies.py"]
+    # **entrypoint 方式にすること。** command: で書くと
+    # `docker compose run --rm import-cookies --save-anyway` のように
+    # 引数を足したときコマンドごと置き換わり、tini が引数を
+    # プログラムとして実行しようとして落ちる（実際に踏んだ）。
+    entrypoint: ["/usr/bin/tini", "--", "python", "import_cookies.py"]
+    # entrypoint を上書きしても image の CMD は消えないので明示的に空にする
+    command: []
     stdin_open: true
     tty: true
 

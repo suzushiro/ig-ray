@@ -315,7 +315,7 @@ def post_to_record(post, with_location=None):
         "caption": _safe(lambda: post.caption),
         "date_utc": date_str,
         "likes": _safe(lambda: post.likes),
-        "comments": _safe(lambda: post.comments),
+        "comments": comments_of(post),
         "typename": typename,
         "is_video": 1 if _safe(lambda: post.is_video, False) else 0,
         "is_carousel": 1 if typename == "GraphSidecar" else 0,
@@ -323,6 +323,26 @@ def post_to_record(post, with_location=None):
         "hashtags_json": json.dumps(hashtags, ensure_ascii=False),
         "media_json": json.dumps(media, ensure_ascii=False),
     }
+
+
+def comments_of(post):
+    """
+    コメント数。**追加リクエストを出さない。**
+
+    instaloader 4.16 の Post.comments は、fake_node に
+    edge_media_to_comment が無いと _field() 経由で全メタデータを取りに行く
+    （投稿1件ごとに1リクエスト）。iphone_struct には comment_count が
+    最初から入っているので、そこを直接読む。取れなければ None で諦める。
+    """
+    node = getattr(post, "_node", None) or {}
+    v = (node.get("iphone_struct") or {}).get("comment_count")
+    if v is not None:
+        return v
+    v = (node.get("edge_media_to_comment") or {}).get("count")
+    if v is not None:
+        return v
+    v = (node.get("edge_media_to_parent_comment") or {}).get("count")
+    return v
 
 
 def profile_to_row(profile):
@@ -475,7 +495,12 @@ def minimal_profile(context, username):
     # __init__ が id の存在を要求するのでダミーを入れる。
     # _has_full_metadata=True により再取得は走らないので、この 0 は
     # そのまま残る。だから userid を DB に書いてはいけない。
-    p = instaloader.Profile(context, {"username": username.lower(), "id": 0})
+    # is_private は instaloader 4.16 の get_posts() が参照する
+    # （非公開かつ未フォローなら例外を出すための判定）。
+    # 無いと _metadata('is_private') が KeyError になる。
+    # False にしておけば、非公開でも普通に問い合わせて Instagram 側の応答に任せる。
+    p = instaloader.Profile(context, {"username": username.lower(), "id": 0,
+                                      "is_private": False})
     p._has_full_metadata = True
     return p
 
@@ -595,7 +620,7 @@ SESSION_HELP = """
         docker run --rm -it \\
           -v ~/insta-ray/data/sessions:/sessions \\
           python:3.12-slim \\
-          bash -c 'pip install -q instaloader==4.15.3 && \\
+          bash -c 'pip install -q instaloader==4.16 && \\
                    instaloader -l "$0" && \\
                    cp /root/.config/instaloader/session-* /sessions/' \\
           IGアカウント名
@@ -670,8 +695,6 @@ def make_loader(login_user=None, verify=True):
         rate_controller=make_rate_controller(),
     )
 
-    if PROXY:
-        L.context._session.proxies = {"http": PROXY, "https": PROXY}
 
     try:
         L.load_session_from_file(user, session_file)
@@ -680,23 +703,30 @@ def make_loader(login_user=None, verify=True):
     except Exception as e:
         return None, f"セッション読み込み失敗（想定外）: {e}"
 
-    # load_session_from_file() はファイルを読むだけで、そのセッションが
-    # まだ有効かは検証しない。死んだセッションのまま走ると匿名アクセス扱いになり、
-    # 意味不明な 429 で死ぬので、ここで必ず確かめる。
+    # **プロキシはセッションを読み込んだ後に入れる。**
+    # load_session_from_file() は内部で _session を作り直すので、
+    # 先に入れると消える（v4.18 まで消えていた。HTTPS_PROXY 環境変数で
+    # 出しているので実害は無かったが、IG_RAY_PROXY は効いていなかった）。
+    if PROXY:
+        L.context._session.proxies = {"http": PROXY, "https": PROXY}
+
+    # **test_login() は使わない。**
+    # test_login() は旧式の query_hash（d6f4427…）を GET で叩くが、
+    # Instagram は 2026-10 にこれを廃止しており、有効なセッションでも
+    # 400 feedback_required / HTML を返す（instaloader 4.16 でも未修正、
+    # 上流 issue #2792）。これを信じた結果、生きているアカウントを
+    # 「制限されている」と誤認して1か月止めていた。
+    #
+    # ここではクッキーが揃っているかだけを見る（通信しない）。
+    # 本当に通るかは最初のアカウントの取得で分かり、セッション起因の
+    # 失敗なら巡回ループ側で __login__ に記録してバックオフする。
     if verify:
-        try:
-            who = L.test_login()
-        except Exception as e:
-            return None, f"ログイン検証中にエラー: {type(e).__name__}: {e}\n" + SOFTBLOCK_HELP
-
-        if not who:
-            return None, ("ログイン検証に失敗しました"
-                          f"（セッションは {user} のものとして読めています）\n"
-                          + SOFTBLOCK_HELP)
-
-        if who.lower() != user.lower():
-            print(f"  [警告] セッションは '{who}' のものです"
-                  f"（IG_RAY_LOGIN_USER は '{user}'）", file=sys.stderr)
+        cookies = L.context._session.cookies.get_dict()
+        missing = [k for k in ("sessionid", "ds_user_id") if not cookies.get(k)]
+        if missing:
+            return None, (f"セッションに {', '.join(missing)} がありません"
+                          f"（{session_file}）。クッキーを取り直してください。\n"
+                          + SESSION_HELP.format(session_dir=SESSION_DIR))
 
     return L, None
 
@@ -886,6 +916,71 @@ def _scrape_posts(conn, loader, profile, username, limit,
             "started_at": started}
 
 
+def verify_session(loader, username):
+    """
+    セッションが**実際に投稿を引けるか**を、1リクエストで確かめる。
+
+    test_login() の代わり。test_login() が叩く旧式 query_hash は
+    2026-10 に廃止されていて、有効なセッションでも必ず失敗する。
+    ここでは巡回と同じ経路（get_posts の1ページ目）を使うので、
+    「検証は通るが取得は通らない／その逆」というズレが起きない。
+
+    戻り値: (ok, エラー文 or None)
+    """
+    try:
+        p = minimal_profile(loader.context, username)
+        it = p.get_posts()          # NodeIterator は生成時に1ページ目を取りに行く
+        next(iter(it), None)
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+# Instagram がセッション単位で拒否しているときに返す印。
+# これが出たら、そのアカウント固有ではなく巡回全体が通らない。
+_SESSION_FAILURE_MARKERS = (
+    "feedback_required", "checkpoint_required", "challenge_required",
+    "login_required", "require_login", "LoginRequiredException",
+    "Please wait a few minutes",
+)
+
+
+def is_session_failure(message):
+    """取得失敗のメッセージが、セッション（ログイン）起因かどうか。"""
+    if not message:
+        return False
+    return any(m in message for m in _SESSION_FAILURE_MARKERS)
+
+
+def _record_login_failure(conn, err, cron):
+    """
+    ログイン（セッション）起因の失敗を __login__ に記録し、
+    cron なら連続回数に応じたバックオフで次回予定を入れる。
+
+    **scrape_log に残す。** 残していなかったために、
+    24日止まっていたのに画面は「直近6時間の失敗なし」と出し続けていた。
+    """
+    n = 1
+    try:
+        db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_error", 0, 0,
+                      _login_error_summary(err))
+        conn.commit()
+        n = db.consecutive_failures(conn, db.LOGIN_LOG_NAME, ("login_error",))
+    except Exception as e:
+        print(f"  [警告] ログイン失敗の記録に失敗: {e}", file=sys.stderr)
+    if cron:
+        delay = login_retry_delay(n)
+        try:
+            when = db.set_next_run(conn, "scrape", delay)
+            if n > 1:
+                print(f"  セッション起因の失敗が {n} 回続いています。"
+                      f"次回は {when.astimezone().strftime('%Y-%m-%d %H:%M')} "
+                      f"まで待ちます（叩き続けると制限が延びるため）")
+        except Exception:
+            pass
+    return n
+
+
 def _login_error_summary(err, limit=300):
     """
     make_loader のエラー文は対処手順を含む長文なので、画面用に先頭だけ取る。
@@ -987,42 +1082,9 @@ def main():
     loader, err = make_loader(args.login_user, verify=not args.skip_verify)
     if loader is None:
         print(err)
-        # **scrape_log に残す。** ここを残していなかったために、
-        # 401 で24日止まっていたのに画面は「直近6時間の失敗なし」と
-        # 出し続けていた（出口IPのぶんだけ塞いでここを見落としていた）。
-        n = 1
-        try:
-            db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_error", 0, 0,
-                          _login_error_summary(err))
-            conn.commit()
-            n = db.consecutive_failures(conn, db.LOGIN_LOG_NAME,
-                                        ("login_error",))
-        except Exception as e:
-            print(f"  [警告] ログイン失敗の記録に失敗: {e}", file=sys.stderr)
-        if args.cron:
-            # 失敗が続くほど間隔を空ける。401 は叩くほど解除が延びるため。
-            delay = login_retry_delay(n)
-            try:
-                when = db.set_next_run(conn, "scrape", delay)
-                if n > 1:
-                    print(f"  ログイン失敗が {n} 回続いています。"
-                          f"次回は {when.astimezone().strftime('%Y-%m-%d %H:%M')} "
-                          f"まで待ちます（叩き続けると制限が延びるため）")
-            except Exception:
-                pass
+        _record_login_failure(conn, err, args.cron)
         conn.close()
         return 2
-
-    # ログインできた。失敗の連続を切っておく
-    # （切らないと consecutive_failures が古い失敗を数え続け、
-    #   復旧しても間隔が延びたままになる）。
-    try:
-        if db.consecutive_failures(conn, db.LOGIN_LOG_NAME, ("login_error",)):
-            db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_ok", 0, 0,
-                          "ログインできました")
-            conn.commit()
-    except Exception:
-        pass
 
     targets = args.usernames or db.enabled_accounts(conn)
     if not targets:
@@ -1030,7 +1092,13 @@ def main():
         conn.close()
         return 1
 
+    # 毎回同じ順番で回らない。アルファベット順・等間隔は機械的すぎる。
+    if not args.usernames:
+        random.shuffle(targets)
+
     rc = 0
+    login_ok_logged = False
+    session_failed = False
     for u in targets:
         print(f"=== {u} ===")
         started = datetime.now(timezone.utc).isoformat()
@@ -1068,6 +1136,31 @@ def main():
               f"inserted={result['inserted']} {result['message'] or ''}")
         if result["status"] not in ("ok", "ok_degraded", "muted"):
             rc = 1
+
+        # 1件でも取れたらセッションは生きている。ログイン失敗の連続を切る
+        # （切らないと consecutive_failures が古い失敗を数え続け、
+        #   復旧してもバックオフが延びたままになる）。
+        if result["status"] in ("ok", "ok_degraded") and not login_ok_logged:
+            login_ok_logged = True
+            try:
+                if db.consecutive_failures(conn, db.LOGIN_LOG_NAME,
+                                           ("login_error",)):
+                    db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_ok", 0, 0,
+                                  "取得できました")
+                    conn.commit()
+            except Exception:
+                pass
+
+        # **セッション起因の失敗は、そのアカウントの問題ではない。**
+        # 残りのアカウントでも同じ結果になるだけなので、巡回を止めて
+        # __login__ に記録し、バックオフに乗せる。
+        if is_session_failure(result.get("message")):
+            print("  セッション起因の失敗です。以降を中止します。")
+            _record_login_failure(conn, result.get("message"), args.cron)
+            session_failed = True
+            rc = 2
+            break
+
         if result["status"] == "ratelimited":
             print("  レート制限を検知。以降を中止します。")
             break
@@ -1075,7 +1168,9 @@ def main():
 
     # 次の周回がいつ始まるかを記録する。cron のシェルはこの直後に
     # sleep INTERVAL に入るので、ここが実際の予定時刻になる。
-    if args.cron:
+    # セッション起因で止めた場合は _record_login_failure がバックオフ込みの
+    # 予定を入れているので上書きしない。
+    if args.cron and not session_failed:
         try:
             when = db.set_next_run(conn, "scrape", CRON_INTERVAL)
             print(f"次回の巡回予定: {when.astimezone().strftime('%Y-%m-%d %H:%M')}")

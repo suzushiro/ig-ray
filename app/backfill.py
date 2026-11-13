@@ -163,7 +163,7 @@ def run_job(conn, loader, job, page_limit=None):
     """
     1アカウントぶんのバックフィルを進める。
 
-    戻り値: 'done' / 'stopped'（既知に当たって打ち切り）/ 'ratelimited' / 'error'
+    戻り値: 'done' / 'stopped'（既知に当たって打ち切り）/ 'ratelimited' / 'session'（セッション起因）/ 'error'
     """
     username = job["username"]
     login_user = getattr(loader.context, "username", None)
@@ -301,13 +301,25 @@ def run_job(conn, loader, job, page_limit=None):
         log("  中断しました（進捗は保存済み）")
         raise
     except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        # **セッション起因の失敗はジョブの失敗ではない。**
+        # error で置くと次のジョブに進んで同じ失敗を繰り返し、
+        # 制限中のアカウントで叩き続けることになる。queued に戻して待つ。
+        if igs.is_session_failure(msg):
+            db.backfill_update(
+                conn, username, status="queued",
+                resume_json=freeze_to_json(iterator), posts_seen=seen,
+                posts_saved=saved, media_saved=media, pages=pages,
+                known_streak=streak, oldest_date=oldest, message=msg)
+            log(f"  セッション起因で中断: {msg}")
+            return "session"
         db.backfill_update(
             conn, username, status="error",
             resume_json=freeze_to_json(iterator), posts_seen=seen,
             posts_saved=saved, media_saved=media, pages=pages,
             known_streak=streak, oldest_date=oldest,
-            message=f"{type(e).__name__}: {e}")
-        log(f"  失敗: {type(e).__name__}: {e}")
+            message=msg)
+        log(f"  失敗: {msg}")
         return "error"
 
     if result == "stopped" and page_limit:
@@ -454,6 +466,28 @@ def cmd_run(conn, args):
             time.sleep(RATELIMIT_BACKOFF)
 
         result = run_job(conn, loader, job, page_limit=args.pages)
+
+        if result == "session":
+            # 巡回（ig_scraper）と同じ記録・同じバックオフに乗せる
+            row = db.backfill_get(conn, job["username"]) or {}
+            n = igs._record_login_failure(conn, row.get("message"), cron=False)
+            delay = max(igs.login_retry_delay(n), RATELIMIT_BACKOFF)
+            log(f"セッション起因の失敗（{n}回連続）。{int(delay // 60)}分あけます")
+            db.set_next_run(conn, WHO, delay)
+            if args.once:
+                return 2
+            time.sleep(delay)
+            continue
+
+        if result in ("done", "stopped"):
+            try:
+                if db.consecutive_failures(conn, db.LOGIN_LOG_NAME,
+                                           ("login_error",)):
+                    db.log_scrape(conn, db.LOGIN_LOG_NAME, "login_ok", 0, 0,
+                                  "バックフィルで取得できました")
+                    conn.commit()
+            except Exception:
+                pass
 
         if result == "ratelimited":
             db.set_next_run(conn, WHO, RATELIMIT_BACKOFF)

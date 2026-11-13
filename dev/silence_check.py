@@ -427,11 +427,21 @@ def test_scraper_wiring():
     i = src.find("if loader is None:")
     j = src.find("targets = args.usernames")
     block = src[i:j]
-    check("ログイン失敗を記録する", "db.LOGIN_LOG_NAME" in block and
-          '"login_error"' in block, block[:200])
-    check("連続回数を数える", "consecutive_failures" in block)
-    check("間隔を延ばす", "login_retry_delay" in block)
-    check("成功したら連続を切る", '"login_ok"' in src[j - 600:j])
+    check("ログインに失敗したら記録する",
+          "_record_login_failure(conn" in block, block[:200])
+    # 記録とバックオフは _record_login_failure にまとめた（巡回中の
+    # セッション起因の失敗とバックフィルからも同じ処理を使うため）
+    k = src.find("def _record_login_failure")
+    rec = src[k:src.find("\ndef ", k + 10)]
+    check("ログイン失敗を __login__ に記録する",
+          "db.LOGIN_LOG_NAME" in rec and '"login_error"' in rec, rec[:200])
+    check("連続回数を数える", "consecutive_failures" in rec)
+    check("間隔を延ばす", "login_retry_delay" in rec)
+    # 連続を切るのは「実際に1件取れたとき」。ログインできただけでは切らない
+    # （v4.19 から検証は通信しないので、ログイン成功＝取得成功ではない）
+    loop = src[j:]
+    check("取得できたら連続を切る", '"login_ok"' in loop and
+          'result["status"] in ("ok", "ok_degraded")' in loop)
 
     # 長文のエラーを画面にそのまま流さない
     fresh()
@@ -481,6 +491,20 @@ def test_compose_passthrough():
                 missing.append(f"{fname}: IG_RAY_{name}")
     check("config.env で読む名前はすべて compose にある",
           not missing, str(sorted(set(missing))))
+
+    # ツール系サービスは entrypoint 方式であること。
+    # command: で書くと `docker compose run --rm <svc> --flag` が
+    # コマンドごと置き換わり、tini が --flag を実行しようとして落ちる。
+    import re as _re
+    blocks = _re.split(r"\n  (?=[a-z][a-z0-9-]*:\n)", compose)
+    no_ep = []
+    for b in blocks:
+        m = _re.match(r"\s*([a-z][a-z0-9-]*):", b)
+        if not m or 'profiles: ["tools"]' not in b:
+            continue
+        if "entrypoint:" not in b:
+            no_ep.append(m.group(1))
+    check("tools のサービスは全部 entrypoint 方式", not no_ep, str(no_ep))
 
     # web が読む名前は web サービスの environment に入っているか
     i = compose.find("\n  web:")

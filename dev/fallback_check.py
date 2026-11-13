@@ -110,9 +110,11 @@ def test_get_posts_uses_username_path():
     captured = {}
 
     class Ctx(FakeContext):
-        def doc_id_graphql_query(self, doc_id, variables, referer=None):
+        def doc_id_graphql_query(self, doc_id, variables, referer=None,
+                                 web_api=False):
             captured["doc_id"] = doc_id
             captured["variables"] = variables
+            captured["web_api"] = web_api
             # 空の結果を返して NodeIterator を成立させる
             return {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {
                 "edges": [], "page_info": {"has_next_page": False, "end_cursor": None}}}}
@@ -133,6 +135,12 @@ def test_get_posts_uses_username_path():
         check("変数に username が入る", v.get("username") == "target_user", str(v))
         check("変数に userid（id）を使っていない", "id" not in v, str(v))
     check("空結果でも落ちない", posts == [])
+    # **廃止されたクエリを投げていないこと。** 7898261790222653 は
+    # 2026-10 に Instagram が廃止し、IG-Ray はこれを投げ続けて1か月止まった。
+    check("廃止された doc_id 7898261790222653 を使わない",
+          captured.get("doc_id") != "7898261790222653", str(captured.get("doc_id")))
+    check("web app の api/graphql に送る（4.16 の方式）",
+          captured.get("web_api") is True, str(captured.get("web_api")))
 
 
 def test_ensure_account_does_not_clobber():

@@ -15,7 +15,7 @@ PREFIXES = ("IG_RAY_", "INSTA_RAY_")
 # アプリのバージョン。**定義はここ1箇所**（画面・README・配布zipで
 # 別々に持つとズレる）。リリースのたびにここを上げる。
 # dev/version_check.py が README の記載と一致しているかを検査する。
-VERSION = "4.18"
+VERSION = "4.19"
 
 
 def env(name, default=None):

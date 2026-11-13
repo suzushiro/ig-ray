@@ -289,8 +289,11 @@ def test_wait_before_query_path():
 
         # TMR版は「捕捉されるが handle_429 の sleep で再度上がる」ため結果的に抜ける。
         # 動くには動くが、instaloader 内部のハンドラ構造に依存している。
+        # 4.16 では ConnectionException に包まれて上がってくる。
+        # どちらにしても「抜ける」ことが重要で、IG-Ray が使うのは FailFast 版。
         check("TooManyRequests版も結果的には抜ける（ただし内部実装依存）",
-              tmr == "TooManyRequestsException", f"got {tmr}")
+              tmr in ("TooManyRequestsException", "ConnectionException"),
+              f"got {tmr}")
 
         check("FailFast版はどの経路でも instaloader のハンドラに触れない",
               fast == "RateLimitAbort" and fast_calls == 0,

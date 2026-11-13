@@ -1,6 +1,6 @@
 # insta-ray worker
 #
-# Python は 3.12 に固定する。母艦の Ubuntu は 3.14 で、instaloader 4.15.3 の
+# Python は 3.12 に固定する。母艦の Ubuntu は 3.14 で、instaloader の
 # 検証済み環境から外れるため。コンテナ側で握っておけば母艦の更新に振られない。
 FROM python:3.12-slim
 

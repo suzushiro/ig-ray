@@ -1,6 +1,6 @@
 # IG-Ray
 
-現在のバージョン: 4.18
+現在のバージョン: 4.19
 
 X-Ray の Instagram 版。**完全独立フォーク**（X-Ray と共通ライブラリ化はしない）。
 スクレイパ層 + Docker 運用 + 表示層（フィード / ユーザーページ / ギャラリー / ブックマーク）。
@@ -34,6 +34,7 @@ dev/route_check.py        表示層の疎通テスト（コンテナ非同梱）
 dev/migration_check.py    既存DBからのマイグレーション検証（コンテナ非同梱）
 dev/egress_check.py       設定まわり・出口IP判定・バナーのテスト（コンテナ非同梱）
 dev/silence_check.py      巡回停止の検知・バックオフのテスト（コンテナ非同梱）
+dev/il416_check.py        instaloader 4.16 移植のテスト（コンテナ非同梱）
 app/backfill.py           全件バックフィル（キュー管理＋常駐ワーカー）
 app/tumblr_client.py      Tumblr API v2 クライアント（OAuth1）
 tools/tumblr_auth.py      Tumblrのアクセストークン取得（初回だけ・コンテナ非同梱）
@@ -58,13 +59,14 @@ zip は X-Ray と同じく**サブフォルダ無しで直下展開**。
 ```bash
 python3 dev/mock_check.py        # 60項目
 python3 dev/ratelimit_check.py   # 23項目
-python3 dev/loader_check.py      # 20項目
+python3 dev/loader_check.py      # 55項目
 python3 dev/accounts_check.py    # 35項目
-python3 dev/fallback_check.py    # 137項目
+python3 dev/fallback_check.py    # 139項目
 python3 dev/route_check.py       # 119項目
 python3 dev/migration_check.py   # 21項目
 python3 dev/egress_check.py      # 124項目
-python3 dev/silence_check.py     # 77項目（巡回が黙って止まるのを検知できるか）
+python3 dev/silence_check.py     # 79項目（巡回が黙って止まるのを検知できるか）
+python3 dev/il416_check.py       # 45項目（instaloader 4.16 移植・廃止クエリを使わない）
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 36項目
 python3 dev/backfill_check.py    # 57項目
@@ -117,7 +119,8 @@ docker compose run --rm login
 ```
 
 パスワードを対話で聞かれます（画面に出ません）。2FA にも対応。
-作成直後に `test_login()` で有効性を検証し、`/data/sessions/session-アカウント名` に保存します。
+作成直後に**自分の投稿を1ページ引いて**有効性を検証し、`/data/sessions/session-アカウント名` に保存します。
+（`test_login()` は使いません。理由は「2026-10 の1か月停止」を参照）
 
 > セッションファイルはパスワード同等の価値があります。`chmod 600` で保存されますが、
 > バックアップやリポジトリに紛れ込ませないこと（`.gitignore` で `data/` を除外済み）。
@@ -385,6 +388,95 @@ docker compose run --rm ipcheck --verdict
 中止しても `--cron` なら次回予定時刻は記録するので、`IG_RAY_INTERVAL` 後に
 再挑戦する。
 
+### 2026-10 の1か月停止（v4.19 で復旧）
+
+**最初に書いておく。原因は Instagram 側のクエリ廃止で、アカウントは無実だった。**
+診断を誤り、生きているアカウントを1か月寝かせた。同じ轍を踏まないための記録。
+
+#### 何が起きたか
+
+| 日付 | 出来事 |
+|---|---|
+| 7/26 | instaloader 4.15.3（IG-Ray が固定していた版） |
+| 10/5 | IG-Ray の最後の成功。以後すべての要求が失敗 |
+| 10/12 | 上流 4.15.4「ログイン時の投稿取得を修正」 |
+| 10/26 | 上流 4.16。新しいクエリを web app の `api/graphql` へ送る方式に移行 |
+| 10/30 | 上流 issue #2792。他の利用者が同じ2つのエラーを報告 |
+| 11/13 | 4.16 で取得できることを確認。v4.19 で移植 |
+
+Instagram は 10 月上旬に、4.15.3 が使う2つの問い合わせを廃止した。
+
+| 用途 | 4.15.3 が叩いていたもの | 廃止後の応答 |
+|---|---|---|
+| 投稿取得 `get_posts()` | `graphql/query` doc_id `7898261790222653` | 400 `feedback_required` / 401 / "execution error" |
+| ログイン検証 `test_login()` | `graphql/query` query_hash `d6f4427…` | 400 `feedback_required` / 401 / HTML |
+
+上流のコードコメント（4.16）:
+
+> Instagram answers the previous queries, 7898261790222653 ("execution error")
+> and 28975909992013618 (400 "feedback_required"), with errors.
+> It must be sent to the web app's api/graphql endpoint.
+
+**`feedback_required` + `"spam": true` は、廃止されたクエリへの応答でもある。**
+文面（"We limit how often you can do certain things…"）はアクションブロックと
+同じなので、アカウントが制限されたように見える。
+
+#### なぜ1か月かかったか（誤診の記録）
+
+| 当時の判断 | 実際 |
+|---|---|
+| 別の出口IPでも同じ応答 → アカウント側で確定 | 「全員に対して死んでいるクエリ」という第三の可能性を落としていた |
+| doc_id POST でも失敗 → エンドポイントの違いでは救えない | 試した doc_id も同じく廃止済みだった |
+| 未ログイン経路は閉鎖 | probe が使った doc_id `7950326061742207` も旧版のもの。結論は無効 |
+| 9日休ませても解けない → 恒常的な制限 | 待つ話ではなかった |
+| ブラウザでは使える → クライアントの形が弾かれている | ブラウザは新しいクエリを使っているので通るのは当然 |
+
+**決め手は「ブラウザでは使える」だった。** アカウントが止められているなら
+ブラウザでも止まる。ブラウザだけ通るなら、まずクライアント（ライブラリ）が
+古い可能性を疑うべきだった。上流の issue と更新履歴を最初に見ていれば
+初日に分かっていた。
+
+**教訓: 外部サービスのAPIが全部同じエラーを返し始めたら、
+自分の環境を疑う前に上流ライブラリの issue と最新版を確認する。**
+
+#### 本当に止められたもの
+
+- **`nullzebra`（最初の取得用アカウント）は停止された。** `checkpoint_url` が
+  `/accounts/suspended/` を指している。廃止されたクエリを cron が24日間・
+  約96回叩き続けたことが一因かもしれない（確証はない）。
+  異議申し立ては SMS 認証の後ろにあり、コードが届かず進めていない
+- 代わりに `sciclone_ai` を使っている。こちらは無傷だった
+
+#### v4.19 でやったこと
+
+- **instaloader を 4.16 に更新**（`requirements.txt`）
+- **`test_login()` を一切使わない。** 4.16 でも未修正（#2792）なので、
+  ログイン検証・`import-cookies`・`login`・`diag` のすべてで、
+  巡回と同じ `get_posts()` の1ページ目を引いて確かめる（`verify_session()`）。
+  `make_loader()` はクッキー（`sessionid` / `ds_user_id`）の有無だけを見て、
+  通信しない
+- **セッション起因の失敗を巡回中に検知する。** 1件目の取得で
+  `feedback_required` 等が出たら、残りのアカウントを叩かずに止め、
+  `__login__` に記録してバックオフに乗せる（`is_session_failure()`）。
+  ログイン検証が通信しなくなったので、ここが実質の検証になる
+- **連続失敗を切るのは「1件取れたとき」。** ログインできただけでは切らない
+- **バックフィルもセッション起因の失敗で止まる。** これまではジョブを
+  `error` にして60秒後に次のジョブへ進み、ジョブの数だけ叩き続けていた。
+  `queued` に戻して巡回と同じバックオフで待つ
+- **`Post.comments` を読まない。** 4.16 では fake_node に無いと投稿1件ごとに
+  全メタデータを取りに行く。`iphone_struct.comment_count` を直接読む（`comments_of()`）
+- **`minimal_profile()` に `is_private: False`。** 4.16 の `get_posts()` が参照する
+- **巡回順を毎回シャッフル。** アルファベット順・等間隔は機械的すぎる
+- **`IG_RAY_PROXY` が効いていなかった**のを修正。`make_loader()` が
+  セッション読み込みの前にプロキシを入れていて、読み込みで `_session` が
+  作り直されると消えていた（`HTTPS_PROXY` で出しているので実害は無かった）
+- 旧エンドポイントを叩く診断（`import-cookies` の生応答表示、
+  `dev/anon_probe.py`）を撤去。**常に `feedback_required` を返すので誤誘導になる**
+
+バックフィルの再開情報（`resume_json`）は旧クエリのものなので、
+4.16 では一致せず捨てられ、頭から再開する。既知の投稿が続いたら打ち切るので
+実害は小さい。
+
 ### 巡回が黙って止まるのを防ぐ（v4.18）
 
 **二度やらかしている。** X-Ray が出口IP判定の中止で12日、IG-Ray が 401 の
@@ -422,10 +514,15 @@ docker compose run --rm ipcheck --verdict
 
 #### 3. 失敗が続いたら叩く間隔を延ばす
 
-401 `"Please wait a few minutes before you try again."` は
-レート超過ではなく**アカウント側の制限**で、叩き続けると解除が延びる。
-IG-Ray 自身のエラーメッセージにそう書いてあるのに、
+セッション起因の失敗（`feedback_required` / `checkpoint_required` /
+401 `"Please wait a few minutes"` など）が続いている間、
 cron は6時間おきに24日間＝約96回叩き続けていた。
+原因が何であれ、通らないと分かっている要求を等間隔で投げ続けるのは
+アカウントに対して最悪の振る舞いになる。
+
+> 当時は「401 はアカウント側の制限」と書いていたが、**誤りだった**。
+> 実際には叩いていたクエリ自体が Instagram 側で廃止されていた。
+> 下の「2026-10 の1か月停止」を参照。
 
 連続失敗の回数ぶん間隔を倍にし、`IG_RAY_LOGIN_BACKOFF_MAX`（既定24時間）で
 頭打ちにする。1回目は延ばさない（偶発的な失敗で間隔を変えない）。
@@ -671,17 +768,21 @@ docker compose run --rm diag 対象アカウント名
 |---|---|
 | A | セッションファイルの存在・サイズ |
 | B | クッキーに `sessionid` があるか |
-| C | **`test_login()` が username を返すか**（サーバ側で有効か） |
-| D | 実際にプロフィールを1件引けるか |
+| C | **自分の投稿を1ページ引けるか**（巡回と同じ経路） |
+| D | 対象アカウントの投稿を1ページ引けるか |
 
-**「直近1リクエストなのに429」はレート超過ではない。** ほぼ確実にアカウントの
-ソフトブロック。`401 "Please wait a few minutes before you try again."` が出たら
-それが確定サイン。ブラウザでログインしてチャレンジを消化し、数日普通に使うこと。
-`few minutes` と書いてあるが実際は数時間〜数日かかる。叩き続けると延びる。
+**C と D は巡回と同じ `get_posts()` を使う。** v4.18 までは C が `test_login()`、
+D が `Profile.from_username()` だったが、前者は 2026-10 に廃止された
+エンドポイント、後者は恒常的に 429 の `web_profile_info` を叩くので、
+**どちらも有効なセッションを「死んでいる」と誤診する**。
+
+> 以前ここに「401 `Please wait a few minutes` はアカウントのソフトブロックの
+> 確定サイン」と書いていたが、**誤り**。廃止されたクエリにもこの応答が返る。
+> 401 を見たら、まず上流（instaloader）の更新を確認すること。
 
 ## web_profile_info が 429 で弾かれる場合
 
-実機で遭遇した状況。セッションは有効（`test_login` は通る）なのに、
+実機で遭遇した状況。セッションは有効（投稿は引ける）なのに、
 `api/v1/users/web_profile_info/` だけが恒常的に 429 を返す。
 
 instaloader の経路はこう分かれている:
@@ -689,7 +790,7 @@ instaloader の経路はこう分かれている:
 | 処理 | エンドポイント |
 |---|---|
 | `Profile.from_username()` | `api/v1/users/web_profile_info/` |
-| `get_posts()`（ログイン時） | `graphql/query`（doc_id POST） |
+| `get_posts()`（ログイン時） | `api/graphql`（doc_id `29104886249145907`、instaloader 4.16） |
 
 `get_posts()` は変数に `username` しか使わないので、`from_username()` を
 経由しなければ投稿は取れる。そこで `minimal_profile()` で
@@ -738,7 +839,7 @@ instaloader 自身も `get_raw()` で同じことをしている。
 
 **`Post.video_url` プロパティを使ってはいけない。**
 
-instaloader 4.15.3 の `video_url` は、`_field('video_url')` と
+instaloader 4.15.3〜4.16 の `video_url` は、`_field('video_url')` と
 `iphone_struct['video_versions']` の全解像度を候補として集め、候補が2つ以上あると
 **Content-Length を比べるために候補ごとに `context.head()` を投げる**。
 実データでは候補はまず複数になるので、**動画投稿1件につきCDNへHEADが2〜4回**飛ぶ。

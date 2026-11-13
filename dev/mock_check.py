@@ -51,10 +51,18 @@ class FakePost:
         self.date_utc = date_utc or datetime(2026, 7, 20, 12, 30, 0)  # naive: IGはUTC naive
         self.likes = likes
         self.comments = comments
+        # 実物（4.16）では Post.comments を読むと全メタデータを取りに行くので、
+        # IG-Ray は iphone_struct の comment_count を直接読む。実物と同じ形にしておく。
         self.typename = typename
         self.is_video = is_video
         self.url = f"https://scontent.example/{shortcode}_display.jpg"
         self.video_url = f"https://scontent.example/{shortcode}.mp4" if is_video else None
+        # 実物（4.16）では Post.comments を読むと全メタデータを取りに行くので、
+        # IG-Ray は iphone_struct の comment_count を直接読む。
+        # 動画の video_url も from_iphone_struct が生ノードに埋めている。実物と同じ形に。
+        self._node = {"iphone_struct": {"comment_count": comments}}
+        if is_video:
+            self._node["video_url"] = self.video_url
         self.location = FakeLocation(location) if location else None
         self._sidecar = sidecar or []
 

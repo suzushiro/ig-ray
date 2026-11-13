@@ -50,7 +50,8 @@ class FakeContext:
         self.pages = pages
         self.per_page = per_page
 
-    def doc_id_graphql_query(self, doc_id, variables, referer):
+    # instaloader 4.16 から第4引数 web_api（api/graphql に送るか）が増えた
+    def doc_id_graphql_query(self, doc_id, variables, referer=None, web_api=False):
         after = variables.get("after")
         self.calls.append(after)
         page = 0 if after is None else int(after[3:]) + 1
