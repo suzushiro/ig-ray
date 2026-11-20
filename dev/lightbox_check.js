@@ -527,6 +527,7 @@ function buildTumblrDom() {
           </div>
           <div id="tmb-account-wrap"><select id="tmb-account"></select></div>
           <textarea id="tmb-caption"></textarea><input type="text" id="tmb-tags">
+          <div id="tmb-preset-note" style="display:none"><span id="tmb-preset-text"></span></div>
           <label id="tmb-draft-wrap"><input type="checkbox" id="tmb-draft"></label>
           <div id="tmb-draft-auto"></div>
           <div id="tmb-src"></div><div id="tmb-msg"></div><button id="tmb-ok"></button>
@@ -559,6 +560,86 @@ function buildTumblrDom() {
           d.querySelectorAll('#tmb-preview img').length === 2);
     check('出典の案内に shortcode が出る',
           d.getElementById('tmb-src').textContent.includes('SC1'));
+    check('定型が無ければタグは空', d.getElementById('tmb-tags').value === '');
+    check('定型が無ければ注記は出ない',
+          d.getElementById('tmb-preset-note').style.display === 'none');
+
+    // --- 投稿主ごとの定型（キャプション・タグ）---
+    // URL で応答を振り分ける。/api/tumblr/preset だけ定型を返す
+    console.log('\n[Tumblr] 投稿主ごとの定型');
+    function routeFetch(dom2, preset) {
+        dom2.window.fetch = async (url) => ({
+            json: async () => String(url).startsWith('/api/tumblr/preset')
+                ? preset : {enabled: true, accounts: [{label: 'main', blog: 'b'}]},
+        });
+    }
+    const dp = buildTumblrDom();
+    routeFetch(dp, {ok: true, owner: 'testuser', saved: true,
+                    caption: '前回のキャプション', tags: 'portrait, film'});
+    await dp.window.openTumblrShare('SC1');
+    const dd = dp.window.document;
+    check('保存済みのキャプションが入る',
+          dd.getElementById('tmb-caption').value === '前回のキャプション',
+          dd.getElementById('tmb-caption').value);
+    check('保存済みのタグが入る',
+          dd.getElementById('tmb-tags').value === 'portrait, film',
+          dd.getElementById('tmb-tags').value);
+    check('復元したことを注記で知らせる',
+          dd.getElementById('tmb-preset-note').style.display !== 'none' &&
+          dd.getElementById('tmb-preset-text').textContent.includes('@testuser'),
+          dd.getElementById('tmb-preset-text').textContent);
+    check('**モーダルが開く前に入っている**（開いてから書き換えると打鍵が消える）',
+          dd.getElementById('tmb-dlg').classList.contains('open') &&
+          dd.getElementById('tmb-caption').value === '前回のキャプション');
+
+    dp.window.tmbPresetReset();
+    check('「初期値に戻す」でキャプションが投稿主名に戻る',
+          dd.getElementById('tmb-caption').value === 'testuser');
+    check('「初期値に戻す」でタグが空に戻る', dd.getElementById('tmb-tags').value === '');
+    check('「初期値に戻す」で注記が消える',
+          dd.getElementById('tmb-preset-note').style.display === 'none');
+
+    // 空のキャプションを保存していたら、空のまま入れる（投稿主名で上書きしない）
+    const de = buildTumblrDom();
+    routeFetch(de, {ok: true, owner: 'testuser', saved: true, caption: '', tags: 'x'});
+    await de.window.openTumblrShare('SC1');
+    check('空のキャプションの定型は空のまま入る',
+          de.window.document.getElementById('tmb-caption').value === '',
+          de.window.document.getElementById('tmb-caption').value);
+
+    // 読んでいる間に別の投稿を開き直したら、古い応答は捨てる
+    // （tmbShortcode は let なので外から書けない。実際に SC1 を開いて設定する）
+    const ds = buildTumblrDom();
+    routeFetch(ds, {ok: true, owner: 'testuser', saved: false});
+    await ds.window.openTumblrShare('SC1');
+    routeFetch(ds, {ok: true, owner: 'someone', saved: true, caption: '古い', tags: 'old'});
+    await ds.window.tmbLoadPreset('OTHER');
+    check('別の投稿の応答は入れない',
+          ds.window.document.getElementById('tmb-caption').value === 'testuser',
+          ds.window.document.getElementById('tmb-caption').value);
+    await ds.window.tmbLoadPreset('SC1');
+    check('（対照）開いている投稿の応答なら入る',
+          ds.window.document.getElementById('tmb-caption').value === '古い',
+          ds.window.document.getElementById('tmb-caption').value);
+
+    // 読めなくても従来どおり開ける
+    const df = buildTumblrDom();
+    df.window.fetch = async (url) => {
+        if (String(url).startsWith('/api/tumblr/preset')) throw new Error('offline');
+        return {json: async () => ({enabled: true, accounts: []})};
+    };
+    await df.window.openTumblrShare('SC1');
+    check('定型が読めなくても投稿主名が入る',
+          df.window.document.getElementById('tmb-caption').value === 'testuser');
+
+    // トーストは投稿主名をエスケープする
+    const dt = buildTumblrDom();
+    dt.window.tmbToast({count: 1, label: 'main', preset_saved: '<b>x</b>'}, false);
+    const toast = dt.window.document.querySelector('.tmb-toast');
+    check('トーストで覚えたことを知らせる',
+          toast && toast.textContent.includes('覚えました'));
+    check('トーストの投稿主名はエスケープされる',
+          toast && !toast.querySelector('b') && toast.innerHTML.includes('&lt;b&gt;'));
 
     summary();
 })();

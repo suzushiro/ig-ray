@@ -20,7 +20,7 @@ import config
 
 DB_PATH = config.db_path()
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +205,23 @@ DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_backfill_status ON backfill_jobs(status, created_at)",
+
+    # schema v9: Tumblr 投稿の定型（キャプション・タグ）を投稿主ごとに覚える。
+    # 同じ人の写真は同じキャプション・タグで流すことが多いので、
+    # 前回の入力を次の投稿の初期値にする。
+    #
+    # **キャプションは「リンクで包む前」の生のテキストを持つ。**
+    # 投稿時に元投稿へのリンク（<a href="…/p/<shortcode>/">…</a>）で
+    # 包むが、リンク先は投稿ごとに違うので持っても意味がない。
+    # 新しいテーブルを足すだけなので、既存DBでもここで作られる。
+    """
+    CREATE TABLE IF NOT EXISTS tumblr_presets (
+        owner_username  TEXT PRIMARY KEY,
+        caption         TEXT,
+        tags            TEXT,
+        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
 
     """
     CREATE TABLE IF NOT EXISTS meta (
@@ -766,6 +783,61 @@ def consecutive_failures(conn, username, statuses):
         else:
             break
     return n
+
+
+def normalize_tags(raw):
+    """
+    タグ文字列を整える。カンマ区切り・前後の空白と # を落とし、重複を除く。
+
+    Tumblr API へ渡す形（リスト）と、保存・入力欄に戻す形（"a, b"）の
+    両方を作れるようにリストで返す。順番は入力順を保つ。
+    """
+    seen, out = set(), []
+    for t in (raw or "").split(","):
+        t = t.strip().lstrip("#").strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def get_tumblr_preset(conn, owner):
+    """投稿主の Tumblr 定型。無ければ None。"""
+    if not owner:
+        return None
+    row = conn.execute(
+        "SELECT owner_username, caption, tags, updated_at "
+        "FROM tumblr_presets WHERE owner_username = ?",
+        (owner.lower(),)).fetchone()
+    return dict(row) if row else None
+
+
+def save_tumblr_preset(conn, owner, caption, tags):
+    """
+    投稿主の Tumblr 定型を保存する（上書き）。
+
+    caption はリンクで包む前の生のテキスト。tags はリストか "a, b" 文字列。
+    空のキャプションも「空にした」という意思として保存する。
+    """
+    if not owner:
+        return False
+    if isinstance(tags, (list, tuple)):
+        tags = ", ".join(tags)
+    tags = ", ".join(normalize_tags(tags))
+    conn.execute(
+        "INSERT INTO tumblr_presets (owner_username, caption, tags, updated_at) "
+        "VALUES (?, ?, ?, datetime('now')) "
+        "ON CONFLICT(owner_username) DO UPDATE SET "
+        "  caption = excluded.caption, tags = excluded.tags, "
+        "  updated_at = excluded.updated_at",
+        (owner.lower(), caption or "", tags))
+    return True
+
+
+def delete_tumblr_preset(conn, owner):
+    cur = conn.execute("DELETE FROM tumblr_presets WHERE owner_username = ?",
+                       ((owner or "").lower(),))
+    return cur.rowcount > 0
 
 
 def last_success_at(conn):

@@ -942,6 +942,13 @@ _SESSION_FAILURE_MARKERS = (
     "feedback_required", "checkpoint_required", "challenge_required",
     "login_required", "require_login", "LoginRequiredException",
     "Please wait a few minutes",
+    # instaloader 4.16 は api/graphql に投げる前に、そのセッションで
+    # トップページ（https://www.instagram.com/）を開いてトークンを拾う。
+    # 停止・ログアウト済みのセッションはここで停止画面やログイン画面へ
+    # リダイレクトされ、302 か「トークンが無い」で落ちる。
+    # 判定を外すとバックオフに乗らず、毎周叩き続けることになる。
+    "302 Found when accessing https://www.instagram.com/",
+    "The start page did not contain the token",
 )
 
 

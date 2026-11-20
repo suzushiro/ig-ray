@@ -1,6 +1,6 @@
 # IG-Ray
 
-現在のバージョン: 4.19
+現在のバージョン: 4.20
 
 X-Ray の Instagram 版。**完全独立フォーク**（X-Ray と共通ライブラリ化はしない）。
 スクレイパ層 + Docker 運用 + 表示層（フィード / ユーザーページ / ギャラリー / ブックマーク）。
@@ -45,6 +45,7 @@ dev/video_check.py        GraphVideo 取り扱いのテスト（コンテナ非�
 dev/rename_db.py          DBファイル名の移行ヘルパ（コンテナ非同梱）
 dev/privacy_check.py      公開ファイルへの環境固有情報の混入検査（コンテナ非同梱）
 dev/tumblr_web_check.py   Tumblr投稿の表示層テスト（コンテナ非同梱）
+dev/tumblr_preset_check.py 投稿主ごとのキャプション・タグ保存のテスト（コンテナ非同梱）
 dev/tumblr_check.py       Tumblr APIクライアントのテスト（コンテナ非同梱）
 dev/target_check.py       監視対象フィルタのテスト（コンテナ非同梱）
 deploy/                   外部公開の設定例（Cloudflare Tunnel）
@@ -66,20 +67,22 @@ python3 dev/route_check.py       # 119項目
 python3 dev/migration_check.py   # 21項目
 python3 dev/egress_check.py      # 124項目
 python3 dev/silence_check.py     # 79項目（巡回が黙って止まるのを検知できるか）
-python3 dev/il416_check.py       # 45項目（instaloader 4.16 移植・廃止クエリを使わない）
+python3 dev/il416_check.py       # 47項目（instaloader 4.16 移植・廃止クエリを使わない）
 python3 dev/purge_check.py       # 39項目
 python3 dev/video_check.py       # 36項目
 python3 dev/backfill_check.py    # 57項目
 python3 dev/backup_page_check.py # 50項目
-python3 dev/target_check.py      # 57項目
+python3 dev/target_check.py      # 60項目
 python3 dev/tumblr_check.py      # 58項目
 python3 dev/tumblr_web_check.py  # 74項目
-python3 dev/privacy_check.py     # 17項目（公開ファイルの情報漏れ検査）
+python3 dev/tumblr_preset_check.py # 38項目（キャプション・タグを投稿主ごとに覚える）
+python3 dev/css_check.py         # 17項目
+python3 dev/privacy_check.py     # 18項目（公開ファイルの情報漏れ検査）
 
-npm i -D jsdom && node dev/lightbox_check.js   # 82項目
+npm i -D jsdom && node dev/lightbox_check.js   # 97項目
 ```
 
-計 880 項目通過。前者が extract_media / post_to_record / save_posts /
+計 1246 項目通過（Python 1149・JS 97）。前者が extract_media / post_to_record / save_posts /
 media_index / accounts / scrape_log / init_db 冪等性、
 後者が instaloader の**本物の** RateController / get_json リトライループを使った
 fail-fast 検証。
@@ -1075,11 +1078,13 @@ Tumblr が一貫した値を求めているので変動させない。
 |---|---|
 | `GET /api/tumblr/accounts` | 投稿先の一覧。**トークンは返さない** |
 | `POST /api/tumblr/post` | `shortcode` / `account` / `caption` / `tags` / `state` / `indices` |
+| `GET /api/tumblr/preset?shortcode=` | その投稿の投稿主に覚えたキャプション・タグ（v4.20） |
 
 `indices` は添付する画像の添字をカンマ区切りで指定（省略時は全部）。
 `state` は `published` / `draft` / `private` / `queue`。
 
 **キャプションの初期値は投稿者のアカウントIDが入る**（編集も削除も可）。
+その投稿主で一度投稿していれば、前回のキャプション・タグが入る（下記）。
 カード側の `.tweet[data-owner]` から取る。共同投稿では相手側の名前になるが、
 その投稿の持ち主としてはそれが正しいのでそのまま使う。
 出典URLは別途 `source_url` として付くので、キャプションは表示テキストだけでよい。
@@ -1123,6 +1128,33 @@ API方式ならローカルファイルを `data[0]`, `data[1]`, … で直接�
 設定されていると、そのホスト名で来たリクエストを**すべて404にする**
 （以前は `/share` 系だけ通していた）。cloudflared と DNS を落とすまでの間、
 ingress の設定ミスで管理画面が外に出るのを防ぐ。落とし終わったら消してよい。
+
+### キャプションとタグを投稿主ごとに覚える（v4.20）
+
+Tumblr に**投稿できたら**、そのときのキャプションとタグを **Instagram の投稿主ごとに**
+`tumblr_presets` テーブル（schema v9）へ上書き保存する。次にその投稿主の投稿を
+シェアするときは、モーダルを開いた時点で前回の内容が入っている。
+
+| | |
+|---|---|
+| 保存のタイミング | 投稿が**成功したときだけ**。失敗した入力は覚えない |
+| 保存の単位 | 投稿主1人につき1件（`owner_username` を小文字で） |
+| 投稿主の決め方 | **サーバが DB の `posts`（無ければ `bookmarks`）から引く**。画面からは送らない |
+| キャプション | **リンクで包む前**のテキストを保存する |
+| タグ | `#` を落とし、大文字小文字を無視して重複を除いた形で保存する |
+| 空のキャプション | 「空にした」として保存する（次回も空で開く） |
+
+**リンク先は保存しない。** Tumblr に送るキャプションは元投稿への
+`<a href="https://www.instagram.com/p/…/">…</a>` で包むが、リンク先は投稿ごとに違うので、
+包む前の文字だけを覚える。包んだものを覚えると、次の投稿で前の投稿へのリンクが付く。
+
+前回の内容が入っているときはモーダルに「@owner の前回の内容」と出る。
+「初期値に戻す」でキャプション＝アカウントID・タグ空に戻せる（保存はされない。
+戻した状態で投稿すれば、それが次回の初期値になる）。
+投稿後のトーストに「@owner のキャプション・タグを覚えました」と出る。
+
+モーダルを素早く開き直したとき、前の投稿の読み込み結果が後から届いても
+**今開いている投稿と shortcode が違えば捨てる**（別の投稿主の内容が混ざらない）。
 
 ### 画像選択と自動下書き（v4.16）
 

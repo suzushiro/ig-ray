@@ -212,6 +212,9 @@ def test_session_failure_marks():
         '"fail" status, message "Please wait a few minutes before you try again."',
         '400 Bad Request - "fail" status, message "checkpoint_required"',
         'LoginRequiredException: Login required to access the posts',
+        # 4.16 がトップページでトークンを拾う段階で落ちる形（停止中の nullzebra で実測）
+        'ConnectionException: 302 Found when accessing https://www.instagram.com/',
+        'BadResponseException: The start page did not contain the token lsd.',
     ]
     for m in real:
         check(f"セッション起因: {m[:40]}…", igs.is_session_failure(m))

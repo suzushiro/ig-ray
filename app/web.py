@@ -447,10 +447,11 @@ def api_tumblr_post():
                         "error": "投稿できるローカル画像がありません"}), 400
 
     source_url = _share_source_url(shortcode)
-    caption = (data.get("caption") or "").strip()
+    raw_caption = (data.get("caption") or "").strip()
+    caption = raw_caption
     if caption and source_url:
         caption = f'<a href="{source_url}">{caption}</a>'
-    tags = [t.strip() for t in (data.get("tags") or "").split(",") if t.strip()]
+    tags = db.normalize_tags(data.get("tags") or "")
 
     res = tumblr_client.create_photo_post(
         account, paths, caption=caption, tags=tags, state=state,
@@ -459,7 +460,64 @@ def api_tumblr_post():
         return jsonify(res), 502
     res["label"] = account["label"]
     res["count"] = len(paths)
+
+    # **投稿できたときだけ**、キャプションとタグを投稿主ごとに覚える。
+    # 失敗した入力は覚えない（直して再投稿するはずなので）。
+    # キャプションはリンクで包む前の生のテキストを保存する。
+    owner = _post_owner(c, shortcode)
+    if owner:
+        try:
+            db.save_tumblr_preset(c, owner, raw_caption, tags)
+            c.commit()
+            res["preset_saved"] = owner
+        except Exception as e:
+            # 保存に失敗しても投稿自体は成功している。投稿結果は返す
+            app.logger.warning("tumblr preset save failed: %s", e)
     return jsonify(res)
+
+
+def _post_owner(c, shortcode):
+    """
+    投稿主のユーザー名。**画面から送られた値は使わない。**
+
+    画面の data-owner は表示用で、改ざんや取り違えがあり得る。
+    定型を誰に紐付けるかは DB の posts から引く。
+    """
+    row = c.execute("SELECT owner_username FROM posts WHERE shortcode = ?",
+                    (shortcode,)).fetchone()
+    if row and row["owner_username"]:
+        return row["owner_username"].lower()
+    # ブックマークだけ残っている（キャッシュ削除済み）投稿にも対応する
+    try:
+        row = c.execute(
+            "SELECT owner_username FROM bookmarks WHERE shortcode = ?",
+            (shortcode,)).fetchone()
+    except Exception:
+        row = None
+    return row["owner_username"].lower() if row and row["owner_username"] else None
+
+
+@app.route("/api/tumblr/preset")
+def api_tumblr_preset():
+    """
+    投稿主ごとに覚えている Tumblr のキャプション・タグを返す。
+
+    モーダルを開いたときに呼び、あれば入力欄の初期値にする。
+    無ければ saved=false（画面側は従来どおり投稿主名をキャプションに入れる）。
+    """
+    shortcode = (request.args.get("shortcode") or "").strip()
+    if not shortcode:
+        return jsonify({"ok": False, "error": "shortcode が必要です"}), 400
+    c = conn()
+    owner = _post_owner(c, shortcode)
+    if not owner:
+        return jsonify({"ok": True, "owner": None, "saved": False})
+    p = db.get_tumblr_preset(c, owner)
+    if not p:
+        return jsonify({"ok": True, "owner": owner, "saved": False})
+    return jsonify({"ok": True, "owner": owner, "saved": True,
+                    "caption": p["caption"] or "", "tags": p["tags"] or "",
+                    "updated_at": p["updated_at"]})
 
 
 @app.route("/")

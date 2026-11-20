@@ -62,6 +62,11 @@
         <textarea id="tmb-caption" rows="3" placeholder="（任意）"></textarea>
         <label class="tmb-label" for="tmb-tags">タグ（カンマ区切り）</label>
         <input type="text" id="tmb-tags" placeholder="（任意） photography, instagram">
+        {# 投稿主ごとに前回のキャプション・タグを覚えている。投稿できたら上書き保存 #}
+        <div class="dlg-note" id="tmb-preset-note" style="display:none">
+            <span id="tmb-preset-text"></span>
+            <a href="#" onclick="tmbPresetReset(); return false;">初期値に戻す</a>
+        </div>
 
         <label class="tmb-check" id="tmb-draft-wrap" style="display:none">
             <input type="checkbox" id="tmb-draft" onchange="tmbDraftToggled(true)">
@@ -497,6 +502,7 @@ let tmbCount = 0;
 let tmbAccounts = null;      // /api/tumblr/accounts の結果（一度だけ取る）
 let tmbDraftManual = false;  // 下書きチェックを人が触ったか
 const TMB_DRAFT_THRESHOLD = 3;   // これ以上選んだら自動で下書きにする
+let tmbOwner = '';               // 開いている投稿の投稿主（表示用。保存先はサーバが決める）
 
 // DOM 要素の取得。**無い要素を触ると openTumblrShare 全体が落ちる**ので、
 // 任意要素はここを通す（v4.15 で HTML と JS の齟齬で実際に踏んだ）。
@@ -600,6 +606,39 @@ function tmbSyncButton() {
     }
 }
 
+// --- 投稿主ごとの定型（キャプション・タグ）----------------------------
+// 投稿できたらサーバ側で投稿主ごとに上書き保存される。
+// ここでは開いたときに読んで初期値にするだけ。
+function tmbPresetDefaults() {
+    // 定型が無いときの初期値：キャプションは投稿主名、タグは空
+    const cap = tmbEl('tmb-caption'); if (cap) cap.value = tmbOwner;
+    const tg = tmbEl('tmb-tags'); if (tg) tg.value = '';
+    tmbShow('tmb-preset-note', false);
+}
+
+async function tmbLoadPreset(shortcode) {
+    let p = null;
+    try {
+        const r = await fetch('/api/tumblr/preset?shortcode=' + encodeURIComponent(shortcode));
+        p = await r.json();
+    } catch (e) {
+        return;     // 読めなければ従来どおりの初期値のまま
+    }
+    // 読んでいる間に別の投稿を開き直していたら捨てる
+    if (!p || !p.saved || shortcode !== tmbShortcode) return;
+    const cap = tmbEl('tmb-caption'); if (cap) cap.value = p.caption || '';
+    const tg = tmbEl('tmb-tags'); if (tg) tg.value = p.tags || '';
+    const t = tmbEl('tmb-preset-text');
+    if (t) t.textContent = '@' + (p.owner || tmbOwner) + ' の前回の内容を入れました。';
+    tmbShow('tmb-preset-note', true);
+}
+
+function tmbPresetReset() {
+    // 入力欄だけ初期値に戻す。保存してある定型は、次に投稿したときに上書きされる
+    tmbPresetDefaults();
+    const cap = tmbEl('tmb-caption'); if (cap) cap.focus();
+}
+
 async function openTumblrShare(shortcode) {
     // 機能が無効なときはモーダル自体が描画されていない。
     // （JS は常に定義しておく。<script> 内に Jinja を書くと
@@ -614,15 +653,17 @@ async function openTumblrShare(shortcode) {
     // キャプションの初期値は投稿者名。編集も削除もできる。
     // カード側の .tweet[data-owner] を使う（共同投稿では相手側の名前になるが、
     // 「その投稿の持ち主」としてはそれが正しい）。
-    const cap = tmbEl('tmb-caption');
-    if (cap) cap.value = (tweet && tweet.dataset.owner) ? tweet.dataset.owner : '';
-    const tg = tmbEl('tmb-tags'); if (tg) tg.value = '';
+    tmbOwner = (tweet && tweet.dataset.owner) ? tweet.dataset.owner : '';
+    tmbPresetDefaults();
     const mg = tmbEl('tmb-msg'); if (mg) mg.textContent = '';
     const src = tmbEl('tmb-src');
     if (src) src.textContent =
         'https://www.instagram.com/p/' + shortcode + '/ が出典として付きます';
 
-    await tmbLoadAccounts();
+    // 投稿主ごとに覚えている前回のキャプション・タグを読む。
+    // アカウント一覧と並行に取り、どちらも揃ってから開く
+    // （開いた後に入力欄が書き換わると、打ち始めた文字が消える）。
+    await Promise.all([tmbLoadAccounts(), tmbLoadPreset(shortcode)]);
 
     // カード上の画像をそのままプレビューに使う（追加リクエストなし）
     const prev = tmbEl('tmb-preview');
@@ -719,13 +760,18 @@ async function tmbPost() {
     tmbToast(data, draft);
 }
 
+function tmbEsc(v) {
+    return String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function tmbToast(data, draft) {
     // 投稿はモーダルを閉じてから知らせる（結果を見て次の操作に移れるように）
     const el = document.createElement('div');
     el.className = 'tmb-toast';
     const what = draft ? '下書きに保存しました' : '投稿しました';
     el.innerHTML = `${what}（${data.count}枚 / ${data.label}）` +
-        (data.post_url ? ` <a href="${data.post_url}" target="_blank" rel="noopener">開く</a>` : '');
+        (data.post_url ? ` <a href="${data.post_url}" target="_blank" rel="noopener">開く</a>` : '') +
+        (data.preset_saved ? `<br><small>@${tmbEsc(data.preset_saved)} のキャプション・タグを覚えました</small>` : '');
     document.body.appendChild(el);
     setTimeout(() => el.classList.add('show'), 10);
     setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 6000);
